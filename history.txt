@@ -1,0 +1,755 @@
+Below is a **comprehensive, 25-page style** project document capturing the **entire ISL → Real-time Text** journey from the very first CNN prototype to the current production-ready monorepo (Next.js frontend + dual FastAPI backends). It is written in a **technical report** format, with deep detail, minute decisions, failure logs, and practical tuning notes you can carry into a new chat as context.
+
+> **Note:** While this is in Markdown, you can export to PDF/Doc easily. It’s intentionally verbose to approximate a 25-page report.
+
+---
+
+# ISL → Real-time Text: End-to-End Project Report
+
+**Author:** Abdullah Ansari
+**Version:** 1.0
+**Date:** 2025-10-07
+
+---
+
+## Table of Contents
+
+1. **Executive Summary**
+2. **Project Objectives & Scope**
+3. **User Personas, Use Cases & Constraints**
+4. **Chronological Timeline (Milestones & Phases)**
+5. **Data Creation & Preprocessing (Image → Landmarks)**
+
+   * 5.1 Image-based Dataset (A–Z, 1–9, blank)
+   * 5.2 Preprocessing with OpenCV
+   * 5.3 From Images to Landmarks: Why We Pivoted
+6. **Model Evolution**
+
+   * 6.1 CNN v0 → v3 (Image-based Letters)
+   * 6.2 Keypoint-based Letters (MLP, 126-D)
+   * 6.3 Phrases: LSTM with Temporal Attention (1662-D)
+   * 6.4 Phrases: TCN (1662-D)
+   * 6.5 Ensemble Strategy (LSTM+TCN)
+7. **Real-time System Evolution**
+
+   * 7.1 Streamlit v1: Basic Camera (cv2)
+   * 7.2 Streamlit WebRTC Attempt & Issues
+   * 7.3 Streamlit OpenCV (“Working”) with Smoothing & Commit Logic
+   * 7.4 Windows & Python Environment Gotchas
+8. **Smoothing, Commit, and Runtime Heuristics**
+
+   * 8.1 Probabilistic EMA
+   * 8.2 Hold-to-Commit
+   * 8.3 Presence Ratio Gating
+   * 8.4 Feature EMA (1662-D)
+   * 8.5 Entropy Guard
+   * 8.6 Frame Stride (Phrases)
+9. **Post-Processing (LLM Normalizer)**
+
+   * 9.1 Rule-based Fallback
+   * 9.2 LLM Providers: OpenAI, Groq, Local
+10. **Next.js Frontend (New Monorepo)**
+
+    * 10.1 Why Next.js
+    * 10.2 MediaPipe Tasks in Browser
+    * 10.3 TF.js for Letters
+    * 10.4 Server-side Phrases (Infer Service)
+    * 10.5 Dark UI, Templates & State Management
+11. **Inference Backend (services/infer)**
+
+    * 11.1 Loading Keras with Custom Layers
+    * 11.2 Endpoints & Contracts
+    * 11.3 Adaptation, Softmax-T, and Ensemble
+12. **Deployment Plan (Vercel + Railway)**
+
+    * 12.1 Frontend Env
+    * 12.2 Backend Env & Start Commands
+    * 12.3 CPU vs GPU Considerations
+13. **Evaluation & Benchmarks**
+
+    * 13.1 Letters (MLP) Metrics
+    * 13.2 Phrases (LSTM/TCN/Ensemble)
+    * 13.3 Real-time FPS, Latency
+14. **Edge Cases, Failures & Lessons**
+15. **Notable Errors & Fixes (Chronological)**
+16. **TF.js Conversion Notes**
+17. **Windows GPU (RTX 4060) Setup Learnings**
+18. **Security & Privacy**
+19. **Project Management: Sprints & Deliverables**
+20. **Risks & Mitigations**
+21. **Roadmap & Future Work**
+22. **Appendix A: API Schemas**
+23. **Appendix B: Tuning Cheat-Sheet**
+24. **Appendix C: Directory Structure**
+25. **Appendix D: Key Code Snippets & Pseudocode**
+
+---
+
+## 1) Executive Summary
+
+This report documents the end-to-end development of a **Real-time Indian Sign Language (ISL) to Text** system, built through multiple iterations:
+
+* **Phase 1:** CNN-based static frame classification for **letters (A–Z)** and **digits (1–9)** using webcam snapshot datasets.
+* **Phase 2:** Pivot to **keypoint-based** approach leveraging **MediaPipe** for landmark extraction:
+
+  * **Letters:** 126-dimensional 2-hand vectors (21×3 per hand).
+  * **Phrases:** 1662-dimensional holistic vectors (Pose 33×4 + Face 468×3 + L/R Hand 21×3).
+* **Phase 3:** Real-time app using **Streamlit** and **OpenCV/WebRTC**. We faced constraints on Windows-async, resolved by a **stable OpenCV pipeline**.
+* **Phase 4:** Introduced robust **smoothing**, **hold-to-commit**, **presence gating**, **feature EMA**, **entropy guard**, and **ensemble** improvements.
+* **Phase 5:** Production-ready monorepo with **Next.js** (client landmarks + TF.js MLP), **FastAPI** inference for phrases (Keras LSTM/TCN with custom layers), and a **postprocess LLM** service for punctuation/glue words.
+
+Key outcomes:
+
+* **Privacy-first**: Only **tokens and compact features** travel to backend; **no video** upload.
+* **Performance**: Letters (**MLP**) run entirely **on device** via TF.js. Phrases use server inference for immediate compatibility with Keras custom layers.
+* **Clean UI**: Dark theme, modern design, creators’ carousel, feature grid, settings, and robust UX.
+
+---
+
+## 2) Project Objectives & Scope
+
+* **Objective:** Enable **real-time ISL** to **readable text** with minimal latency and high usability.
+* **Secondary objectives:** Maintain **privacy**, **portability** (runs in browsers), and scalable backend separation.
+
+**In scope:**
+
+* Letter classification (A–Z, 1–9, blank)
+* Phrase recognition (short ISL phrases)
+* Real-time streaming with commit logic
+* Postprocessing with LLM or rules for grammatical smoothing
+* Next.js UI & dual FastAPI services (infer + postprocess)
+
+**Out of scope (for MVP):**
+
+* Full sentence-level grammar modeling beyond LLM postprocess
+* Large vocabulary continuous sign language (LVCSL)
+* Mobile native apps (planned for future)
+
+---
+
+## 3) User Personas, Use Cases & Constraints
+
+**Personas:**
+
+* **Deaf/Hard-of-Hearing users** who sign and want text output quickly.
+* **Educators/Students** learning ISL.
+* **Hackathon evaluators** testing real-time demos.
+
+**Use cases:**
+
+* Conversational phrases to produce readable sentences.
+* Single letters for spelling names/numbers.
+* Exportable transcripts.
+
+**Constraints:**
+
+* Runs on average laptops; no dedicated GPU required.
+* Browser-based, minimal installs for end users.
+* Efficient under variable lighting and backgrounds.
+
+---
+
+## 4) Chronological Timeline (Milestones & Phases)
+
+**M0: Data Bootstrapping (CNN route)**
+
+* Built webcam capture tool to collect images into classes: A–Z, 1–9, blank.
+* Preprocessed with OpenCV (grayscale 128×128).
+* Split into train/val/test.
+
+**M1: CNN v0 → v3 (Letters)**
+
+* v0: small 3-conv CNN; v1/v2 add dropout & batchnorm; v3 tuned LR & augmentations.
+* Achieved acceptable accuracy on static images; **but real-time frame-by-frame** was noisy and heavy.
+
+**M2: Pivot to MediaPipe Keypoints**
+
+* Extracted 2-hand landmarks for letters (126-D).
+* MLP model → faster, compact, robust to lighting.
+* Normalization centered at wrist (wcs_fn), presence masking.
+
+**M3: Phrases with Holistic Features**
+
+* Extracted Pose + Face + Hands (1662-D).
+* Trained **LSTM** with **TemporalAttentionLayer** and **TCN**.
+* Tuned sequence length **T≈48**, features padded/adapted as needed.
+
+**M4: Real-time Streamlit**
+
+* Streamlit basic (OpenCV): working.
+* Streamlit WebRTC: tricky on Windows (async event loop + STUN errs + duplicate keys).
+* Returned to **OpenCV Streamlit** for stability.
+
+**M5: Runtime Stabilizers**
+
+* Implemented **Prob EMA**, **hold-to-commit**, **presence ratio gating**, **feature EMA** (1662-D), **entropy guard**, and **frame stride**.
+* Ensemble mixing: α=0.5, LSTM/T=0.85, TCN/T=0.95.
+
+**M6: Monorepo (Next.js + FastAPI)**
+
+* **Client:** MediaPipe Tasks in browser; TF.js MLP (letters).
+* **services/infer:** Keras LSTM/TCN phrases + custom layers; restful endpoints.
+* **services/postprocess:** LLM normalizer, rule-based fallback.
+* Elegant dark UI with requested templates & creators’ credits.
+
+---
+
+## 5) Data Creation & Preprocessing (Image → Landmarks)
+
+### 5.1 Image-based Dataset (A–Z, 1–9, blank)
+
+* **Acquisition:** Captured with webcam into class folders `A/… Z/`, `1/…9/`, `blank/`.
+* **Data hygiene:** Ensured class balance; removed blurry samples; stratified splits.
+
+**Augmentations:**
+
+* Random rotations ±10°, shift ±5%, brightness ±20%, noise injection.
+
+### 5.2 Preprocessing with OpenCV
+
+* **128×128 grayscale** resizing.
+* Histogram equalization for contrast normalization (trial).
+* Normalized [0,1].
+
+### 5.3 From Images to Landmarks: Why We Pivoted
+
+* Frame-level CNNs were **heavy** and **sensitive to background/lighting**.
+* By using **MediaPipe landmarks**:
+
+  * **Smaller input vector** (126/1662 dims).
+  * **More robust** to changing backgrounds.
+  * **Better latency** for real-time inference.
+
+---
+
+## 6) Model Evolution
+
+### 6.1 CNN v0 → v3 (Image-based Letters)
+
+* **v0**: 3×(Conv→ReLU→MaxPool), FC→Softmax.
+
+  * Pros: Simple baseline.
+  * Cons: Overfit on lighting; poor generalization when run live.
+
+* **v1**: Added **Dropout**, **BatchNorm**.
+
+  * Stability improved but still noisy in real-world streaming.
+
+* **v2**: Changed optimizer to **AdamW**, LR schedule.
+
+  * Some improvements in validation but still shaky.
+
+* **v3**: Heavy augmentation; early stopping; class weights;
+
+  * Acceptable offline; but we needed better **structured features** for realtime.
+
+**Decision:** Shift to **MediaPipe keypoints**.
+
+### 6.2 Keypoint-based Letters (MLP, 126-D)
+
+* **Input:** 2 hands × 21 points × (x,y,z) = **126-D**.
+
+* **Preprocess:**
+
+  * `wcs_fn`: center at wrist, scale by max span → normalized to [–1,1] range (effective).
+  * `pres_fn`: presence mask to handle missing hands gracefully.
+
+* **MLP architecture:**
+
+  * Dense(256) → ReLU → Dropout(0.3) → Dense(128) → ReLU → Dense(#classes) → Softmax.
+  * Loss: categorical cross-entropy; Optimizer: Adam; LR 1e-3→1e-4.
+  * Balanced dataset + light jitter.
+
+* **Performance:**
+
+  * Stable real-time; robust under moderate lighting changes.
+
+### 6.3 Phrases: LSTM with Temporal Attention (1662-D)
+
+* **Input:** 1662-D holistic features (Pose 33×4, Face 468×3, L/R Hand 21×3).
+* **Sequence length (T):** 48 frames (≈1.6s @30fps; with stride reduces overhead).
+* **Model:**
+
+  * LSTM (BiLSTM) → **TemporalAttentionLayer** → Dense(#classes) → Softmax.
+  * Custom layer serializable via `custom_objects`.
+* **Training:** Balanced phrase sequences; truncated/padded to T; minor noise.
+* **Observations:** Good for smooth signs; misclassifies when face landmarks drop under occlusion or extreme angles.
+
+### 6.4 Phrases: TCN (1662-D)
+
+* **Reason:** Provides temporal receptive fields with faster inference than LSTM for longer sequences.
+* **Model:** 1D dilated temporal conv stack → GAP → Dense → Softmax.
+* **Training:** Similar to LSTM; T=48; stable but sensitive to presence quality.
+
+### 6.5 Ensemble Strategy (LSTM + TCN)
+
+* **Formula:** `p = α * softmax_T(lstm, T_lstm) + (1-α) * softmax_T(tcn, T_tcn)`
+* **Typical params:** α=0.5, T_lstm=0.85, T_tcn=0.95.
+* **Benefit:** More stable across diverse motion speeds and partial occlusions.
+
+---
+
+## 7) Real-Time System Evolution
+
+### 7.1 Streamlit v1: Basic Camera (cv2)
+
+* Direct capture via OpenCV → stable and simple.
+* Pros: Minimal dependencies; deterministic.
+* Cons: No browser remote view.
+
+### 7.2 Streamlit WebRTC Attempt & Issues
+
+* **Goal:** In-browser camera streaming via `streamlit-webrtc`.
+
+* **Errors:**
+
+  * `StreamlitDuplicateElementId`: multiple `button` without unique `key` → fixed by adding `key="..."`.
+  * `NoSessionError`: Running script directly with `python` vs `streamlit run` → fixed by running through Streamlit.
+  * **Windows asyncio** with `aiortc/aioice` STUN: `NoneType has no attribute 'sendto'` → we added:
+
+    ```python
+    if os.name == "nt":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    ```
+
+    But we still observed flakiness sometimes on certain Windows setups or network restrictions.
+
+* **Conclusion:** For reliability under time constraints, we moved to **OpenCV path** for MVP.
+
+### 7.3 Streamlit OpenCV (“Working”) with Smoothing & Commit
+
+* Implemented entire working real-time app with proper overlays, commit, smoothing.
+* MLP letters working **very well**; phrases improved via ensemble + heuristics.
+
+### 7.4 Windows & Python Environment Gotchas
+
+* **Deprecations (TF/Keras)**: `tf.placeholder` → `tf.compat.v1.placeholder` logs; `use_column_width` → `use_container_width`.
+* **TF oneDNN logs**: benign; can be suppressed; numeric non-det determinism warnings.
+* **Virtualenv clutter**: At one point, requested command to remove venv (Windows: delete folder `.venv` / `isl-env`).
+
+---
+
+## 8) Smoothing, Commit, and Runtime Heuristics
+
+### 8.1 Probabilistic EMA
+
+* Maintain smoothed probabilities:
+
+  ```
+  p_t = α p_{t-1} + (1-α) p_raw
+  ```
+* Letters EMA: 0.80–0.90; Phrases: 0.90 recommended.
+
+### 8.2 Hold-to-Commit
+
+* If **top-1 confidence** ≥ threshold (0.55), start a timer.
+* If held ≥ 3.0s and cooldown ≥ 0.8s elapsed → **commit** token/phrase.
+* Avoids spurious, flickery commits.
+
+### 8.3 Presence Ratio Gating
+
+* For 1662-D vector, compute **non-zero ratio**.
+* If < 0.35 → skip frame (“low presence…”). Reduces noise when landmarks missing.
+
+### 8.4 Feature EMA (1662-D)
+
+* Smoother for input features: `v = β v + (1-β) x` with β≈0.75.
+* Stabilizes phrase features before feeding LSTM/TCN.
+
+### 8.5 Entropy Guard
+
+* Compute H(p) = –Σ p log p. If > 2.2 → treat as **“uncertain”**; don’t commit.
+* Removes high-entropy noise from inference.
+
+### 8.6 Frame Stride (Phrases)
+
+* Append every **2nd** frame to buffer; reduces compute load and stabilizes.
+
+**Working Set (from Streamlit success):**
+
+* `confTh=0.55`, `hold=3.0s`, `cool=0.8s`, `emaAlpha=0.90`, `presence=0.35`, `featEMA=0.75`, `maxEntropy=2.2`, `stride=2`, `α=0.5`, `Tl=0.85`, `Tt=0.95`.
+
+---
+
+## 9) Post-Processing (LLM Normalizer)
+
+### 9.1 Rule-based Fallback
+
+* Deterministic small set of patterns:
+
+  * `HELLO HOW YOU` → `Hello, how are you?`
+  * `WHAT NAME YOU` → `What is your name?`
+  * `WHERE TOILET` → `Where is the toilet?`
+  * Default: capitalization + trailing period.
+
+### 9.2 LLM Providers
+
+* **OpenAI** (e.g., `gpt-4o-mini`), **Groq** (e.g., `llama-3.1-70b-versatile`), or **local** (OpenAI-style endpoint).
+* System prompt instructs minimal hallucination, just glue words & punctuation.
+
+---
+
+## 10) Next.js Frontend (New Monorepo)
+
+### 10.1 Why Next.js
+
+* Production-grade SSR/CSR mix, excellent deploy path on **Vercel**.
+* Our app is mostly client-side for vision; Next is still great for UI and static hosting.
+
+### 10.2 MediaPipe Tasks in Browser
+
+* Using `@mediapipe/tasks-vision` for:
+
+  * **HandLandmarker** (2 hands)
+  * **PoseLandmarker** (light)
+  * **FaceLandmarker** (1 face)
+* Drawing overlay on canvas; builds **vec126** and **vec1662** per frame.
+
+### 10.3 TF.js for Letters
+
+* Load **TF.js letters MLP** from `/public/models/letters/model.json`.
+* If absent → **mock** path to test UI.
+
+### 10.4 Server-side Phrases (Infer Service)
+
+* Sends last window of features to `/infer/lstm`, `/infer/tcn`, or `/infer/ensemble`.
+* Receives probabilities; applies smoothing, commit, entropy, etc., in the browser.
+
+### 10.5 Dark UI, Templates & State
+
+* **Zustand** state: mode, top-K, transcript, hold state, config.
+* **Templates (equivalents)**: hero, creator carousel (with required names), feature grid; dotted/glow style.
+* **Settings**: Postprocess URL, phrase infer base URL, provider; all adjustable at runtime.
+
+---
+
+## 11) Inference Backend (services/infer)
+
+### 11.1 Loading Keras with Custom Layers
+
+* `custom_objects={'TemporalAttentionLayer': TemporalAttentionLayer}`
+* `safe_mode=False`, `compile=False`.
+* Loads `best.keras` from `models/isl_phrases_v3_lstm` and `models/isl_phrases_v3_tcn`.
+
+### 11.2 Endpoints & Contracts
+
+* `GET /infer/meta` → labels, T_lstm, D_lstm, T_tcn, D_tcn.
+* `POST /infer/lstm` → JSON body with `x: List[List[float]]` shape `[T_lstm, ?]`; server adapts to D.
+* `POST /infer/tcn` → same for TCN.
+* `POST /infer/ensemble` → `xl`, `xt`, `alpha`, `Tl`, `Tt`; returns combined probs.
+
+### 11.3 Adaptation & Softmax-T
+
+* Adapts incoming feature vector dimension to model D using zero padding.
+* Softmax with temperature to sharpen/flatten predictions; used in ensemble.
+
+---
+
+## 12) Deployment Plan (Vercel + Railway)
+
+**Frontend → Vercel**
+
+* Root: `frontend`
+* Env:
+
+  * `NEXT_PUBLIC_INFER_POSTPROC_HTTP` (→ Railway postprocess `/postprocess`)
+  * `NEXT_PUBLIC_INFER_PHRASE_HTTP` (→ Railway infer base)
+
+**Backend → Railway**
+
+* **services/infer**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+* **services/postprocess**: same as above; set `LLM_PROVIDER`, `OPENAI_API_KEY`/`GROQ_API_KEY`/`LOCAL_GPT_URL`.
+
+**CPU vs GPU**
+
+* TensorFlow inference for phrases on CPU is feasible but watch memory; scale up RAM if needed.
+* Consider TFLite/ONNX later for optimization.
+
+---
+
+## 13) Evaluation & Benchmarks
+
+### 13.1 Letters (MLP)
+
+* **Offline**: High accuracy on A–Z, 1–9; blank properly handled if included in training.
+* **Real-time**: Stable with smoothing + commit. **FPS 25–30** easily in Chrome on laptop.
+
+### 13.2 Phrases (LSTM/TCN/Ensemble)
+
+* **Offline**: Good on curated subsets; attention helps when hands & face are well captured.
+* **Real-time**:
+
+  * Quality depends on **presence ratio**, face visibility, distance to camera.
+  * Ensemble with T-softmax improves stability.
+  * Use **hold-to-commit** and **entropy guard** to prevent noise commits.
+
+### 13.3 Latency
+
+* Letters: TF.js on device → low; under ~10ms per frame.
+* Phrases: 1–2 network roundtrips per window; consider `stride` to reduce frequency.
+
+---
+
+## 14) Edge Cases, Failures & Lessons
+
+* **Handedness mismatch**: MediaPipe sometimes flips; we fallback to index order or handedness meta.
+* **Occlusions**: If face or hands get occluded → presence drops; gating helps skip.
+* **Lighting**: Too dark → fail to detect landmarks; instruct users on lighting.
+* **Distance**: If too far from camera → low resolution for face landmarks.
+* **Rapid motions**: Increase **stride** or reduce T; consider TCN’s robustness.
+* **Left-hand signers**: Ensure “Left/Right” mapping robust; we choose to read both and fill whichever present.
+
+---
+
+## 15) Notable Errors & Fixes (Chronological)
+
+* **StreamlitDuplicateElementId**: Buttons must have unique `key`.
+* **NoSessionError (streamlit_webrtc)**: Running with `python script.py`; must run with `streamlit run`.
+* **aioice STUN errors on Windows**:
+
+  * `NoneType` attribute errors; add:
+
+    ```python
+    if os.name == "nt":
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    ```
+  * Still flaky depending on network; fallback to OpenCV approach.
+* **`use_column_width`** deprecated: replaced with `use_container_width`.
+* **Keras/TF deprecations**: `tf.placeholder` logs — using compat layer.
+* **TFJS environment conflicts**: Virtualenv had conflicts; eventually we decided to isolate environment for conversion.
+* **VSCode memory**: Possibly due to Python indexing; can disable large workspace watchers.
+
+---
+
+## 16) TF.js Conversion Notes
+
+* **Letters MLP**:
+
+  * Use `tensorflowjs_converter` to convert `.keras` → TF.js.
+  * Place `model.json` + shard bins under `frontend/public/models/letters/`.
+* **Phrases LSTM/TCN**:
+
+  * Custom `TemporalAttentionLayer` complicates TF.js.
+  * For MVP, we **kept phrases server-side** to reuse Keras + custom layers on Python.
+  * Plan: if needed, re-implement the custom layer in pure TF.js or export TFLite & run Wasm.
+
+---
+
+## 17) Windows GPU (RTX 4060) Setup Learnings
+
+* Attempted CUDA 12.x + cuDNN with TF 2.17.1/2.18.0.
+* PowerShell policy blocked venv activation at one point; overcame with ExecutionPolicy changes.
+* **Recommendation:** Use **Anaconda** for GPU envs or keep CPU inference for dev simplicity; switch to colab/cloud for heavy training.
+
+---
+
+## 18) Security & Privacy
+
+* **No camera video upload** to servers.
+* Backend receives either:
+
+  * **Committed tokens** only → for `/postprocess`.
+  * **Compact feature windows** of floating point numbers for phrase inference → does not reconstruct video.
+* No persistent database storage in MVP.
+
+---
+
+## 19) Project Management: Sprints & Deliverables
+
+* **Sprint 1:** Data collection & CNN baselines; webcam snapshot pipeline.
+* **Sprint 2:** MediaPipe pivot; MLP letters.
+* **Sprint 3:** Phrases (LSTM/TCN), sequences, attention layer.
+* **Sprint 4:** Real-time Streamlit & heuristics; robust commit logic.
+* **Sprint 5:** Monorepo conversion to Next.js + FastAPI; dark UI; deploy scripts.
+* **Sprint 6 (Current):** Stabilize UI + phrase endpoints; verify LLM postprocess end-to-end.
+
+Deliverables:
+
+* Functional MVP, E2E demo locally and deployable on Vercel + Railway.
+* Documentation (this report) + code.
+
+---
+
+## 20) Risks & Mitigations
+
+* **Landmark failures** → presence gating & entropy guard.
+* **Network latency** → stride, local TF.js for letters, minimal payloads for phrases.
+* **Model drift** → planned dataset expansion; domain augmentation.
+* **LLM costs** → local provider fallback & rule-based default.
+
+---
+
+## 21) Roadmap & Future Work
+
+* **Better phrase dataset**: More classes, balanced sequences.
+* **Grammar modeling**: Finite state grammar or transformer over tokens; domain-specific templates.
+* **On-device phrase inference**: TFLite + Wasm / WebGPU; custom layer port.
+* **Mobile PWA** + offline capabilities.
+* **Language switching**: Hindi output mode, Hinglish tolerant postprocess.
+* **User training**: Visual guidance overlay to help user adjust pose/lighting.
+
+---
+
+## 22) Appendix A: API Schemas
+
+**/infer/meta (GET)**
+
+```json
+{
+  "labels": ["HELLO", "THANK YOU", "..."],
+  "T_lstm": 48, "D_lstm": 1662,
+  "T_tcn": 48,  "D_tcn": 1662
+}
+```
+
+**/infer/lstm (POST)**
+
+```json
+{
+  "x": [[...1662 floats...], "... up to T_lstm rows ..."]
+}
+```
+
+Response:
+
+```json
+{ "probs": [0.1, 0.3, 0.6, ...] }
+```
+
+**/infer/tcn (POST)**: same shape, returns `probs`.
+
+**/infer/ensemble (POST)**
+
+```json
+{
+  "xl": [[...]], "xt": [[...]],
+  "alpha": 0.5, "Tl": 0.85, "Tt": 0.95
+}
+```
+
+Response: `{ "probs": [...] }`
+
+**/postprocess (POST)**
+
+```json
+{ "raw_tokens": ["HELLO", "HOW", "YOU"], "lang": "en", "style": "simple" }
+```
+
+Response:
+
+```json
+{ "text": "Hello, how are you?", "note": "..." }
+```
+
+---
+
+## 23) Appendix B: Tuning Cheat-Sheet
+
+* **Letters:**
+
+  * EMA α: 0.80–0.90
+  * Commit threshold: 0.55
+  * Hold: 3.0s
+  * Cooldown: 0.8s
+
+* **Phrases:**
+
+  * Presence ratio: min 0.35
+  * Feature EMA β: 0.75
+  * Entropy max: 2.2
+  * Stride: 2
+  * Ensemble α: 0.5
+  * Softmax-T: LSTM=0.85, TCN=0.95
+
+* **UI:**
+
+  * Toggle hold on `Space`
+  * `Ctrl+Enter`: immediate commit
+  * `Ctrl+Z`: undo
+
+---
+
+## 24) Appendix C: Directory Structure
+
+```
+.
+├─ frontend/          # Next.js app (dark theme)
+│  ├─ components/     # Hero, Carousel, FeatureGrid, etc.
+│  ├─ lib/            # store, vision (mediapipe), smoothing, tf_letters
+│  ├─ public/models/letters/  # TF.js MLP files
+│  └─ ...
+├─ services/
+│  ├─ infer/          # Keras LSTM/TCN phrase inference
+│  └─ postprocess/    # LLM punctuation/glue words
+├─ models/            # Your existing models (.keras) + labels.json
+├─ custom_layers.py   # TemporalAttentionLayer definition
+└─ scripts/           # dev scripts
+```
+
+---
+
+## 25) Appendix D: Key Code Snippets & Pseudocode
+
+**Commit Logic (simplified):**
+
+```python
+if top_conf >= confTh:
+    if candidate == top_idx:
+        if since is None: since = now_ms
+        if (now_ms - since) >= hold_ms and (now_ms - last_commit) >= cooldown_ms:
+            commit(top_idx)
+            last_commit = now_ms
+            candidate = None; since = None
+    else:
+        candidate = top_idx; since = now_ms
+else:
+    candidate = None; since = None
+```
+
+**Entropy Guard:**
+
+```python
+def entropy(p):
+    return -np.sum(np.clip(p, 1e-8, 1.0) * np.log(np.clip(p, 1e-8, 1.0)))
+
+if entropy(pred) > maxEntropy:
+    # skip prediction as uncertain
+```
+
+**Presence Ratio:**
+
+```python
+presence = np.count_nonzero(vec1662) / len(vec1662)
+if presence < min_presence:
+    # skip low presence frames
+```
+
+**Feature EMA:**
+
+```python
+v = beta * v + (1 - beta) * x
+```
+
+**Ensemble:**
+
+```python
+p = alpha * softmax_T(p_lstm, Tl) + (1 - alpha) * softmax_T(p_tcn, Tt)
+```
+
+**Letters Preprocessing (wcs_fn):**
+
+* Center at wrist
+* Normalize by hand span (max pairwise distance)
+* Compute presence mask
+
+---
+
+## Conclusion
+
+This document encapsulates the full arc of the **ISL → Real-time Text** project: from initial CNN trials to a robust **keypoint-based** system with **client-side TF.js** letters, **server-side LSTM/TCN** phrases, and **LLM postprocessing**—all integrated within a polished **Next.js** interface.
+
+The current architecture is modular, **privacy-first**, deployable with **Vercel + Railway**, and tuned for real-time usability (smoothing, hold-to-commit, gating, entropy, ensemble). It is ready for extension into a production build with larger phrase datasets, better grammar modeling, and eventual on-device phrase inference.
+
+

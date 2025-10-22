@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import List, Dict
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -39,8 +39,55 @@ lstm = keras.models.load_model(
     str(LSTM_DIR/'best.keras'), compile=False, custom_objects=custom, safe_mode=False)
 tcn = keras.models.load_model(
     str(TCN_DIR/'best.keras'),  compile=False, custom_objects=custom, safe_mode=False)
-letters = keras.models.load_model(
-    str(LETTERS_DIR/'best.keras'), compile=False, custom_objects=custom, safe_mode=False)
+# Load letters model with comprehensive error handling
+letters = None
+model_loading_errors = []
+
+# Method 1: Try with all custom objects
+try:
+    letters = keras.models.load_model(
+        str(LETTERS_DIR/'best.keras'), compile=False, custom_objects=custom, safe_mode=False)
+    print("✅ Letters model loaded with custom objects")
+except Exception as e:
+    model_loading_errors.append(f"Method 1 (custom objects): {e}")
+
+# Method 2: Try with minimal custom objects (only the essential ones)
+if letters is None:
+    try:
+        minimal_custom = {
+            'wcs_fn': wcs_fn,
+            'pres_fn': pres_fn
+        }
+        letters = keras.models.load_model(
+            str(LETTERS_DIR/'best.keras'), compile=False, custom_objects=minimal_custom, safe_mode=False)
+        print("✅ Letters model loaded with minimal custom objects")
+    except Exception as e:
+        model_loading_errors.append(f"Method 2 (minimal custom): {e}")
+
+# Method 3: Try without custom objects
+if letters is None:
+    try:
+        letters = keras.models.load_model(
+            str(LETTERS_DIR/'best.keras'), compile=False, safe_mode=False)
+        print("✅ Letters model loaded without custom objects")
+    except Exception as e:
+        model_loading_errors.append(f"Method 3 (no custom): {e}")
+
+# Method 4: Try with legacy format
+if letters is None:
+    try:
+        letters = keras.models.load_model(
+            str(LETTERS_DIR/'model.h5'), compile=False, custom_objects=custom, safe_mode=False)
+        print("✅ Letters model loaded from H5 format")
+    except Exception as e:
+        model_loading_errors.append(f"Method 4 (H5 format): {e}")
+
+# If all methods failed, raise error with details
+if letters is None:
+    error_msg = "Failed to load letters model with all methods:\n" + \
+        "\n".join(model_loading_errors)
+    print(f"❌ {error_msg}")
+    raise RuntimeError(error_msg)
 
 with open(LSTM_DIR/'labels.json', 'r', encoding='utf-8') as f:
     labels_obj = json.load(f)
@@ -62,7 +109,7 @@ class InferReq(BaseModel):
 
 
 class LettersReq(BaseModel):
-    x: List[float]
+    x: List[float]  # Single 126-dim vector
 
 
 class EnsReq(BaseModel):
@@ -126,17 +173,44 @@ def infer_tcn(req: InferReq):
 
 @app.post('/infer/letters')
 def infer_letters(req: LettersReq):
-    x = np.array(req.x, dtype=np.float32)
-    x = x.reshape(1, -1)  # Reshape to (1, 126) for the model
-    print(f"Letters input shape: {x.shape}")
-    print(f"Letters input range: [{np.min(x):.4f}, {np.max(x):.4f}]")
-    print(f"Letters input mean: {np.mean(x):.4f}")
-    y = letters.predict(x, verbose=0)
-    probs = y[0]
-    print(f"Letters output shape: {probs.shape}")
-    print(f"Letters max prob: {np.max(probs):.4f}")
-    print(f"Letters top 3 indices: {np.argsort(-probs)[:3]}")
-    return {'probs': probs.tolist()}
+    try:
+        x = np.array(req.x, dtype=np.float32)
+        if len(x) != 126:
+            raise ValueError(f"Expected 126-dim vector, got {len(x)}")
+
+        print(f"Backend received vec126:")
+        print(f"  Length: {len(x)}")
+        print(f"  Range: [{np.min(x):.4f}, {np.max(x):.4f}]")
+        print(f"  First 10: {x[:10].tolist()}")
+        print(f"  Last 10: {x[-10:].tolist()}")
+        print(f"  Non-zero count: {np.count_nonzero(x)}")
+
+        x = x.reshape(1, -1)  # Reshape to (1, 126) for the model
+        print(f"Letters input shape: {x.shape}")
+
+        y = letters.predict(x, verbose=0)
+        probs = y[0]
+
+        print(f"Letters output shape: {probs.shape}")
+        print(f"Letters max prob: {np.max(probs):.4f}")
+        print(f"Letters top 3 indices: {np.argsort(-probs)[:3]}")
+
+        # Get top prediction
+        top_idx = int(np.argmax(probs))
+        top_label = letters_labels[top_idx]
+        top_conf = float(probs[top_idx])
+
+        print(f"Predicted: {top_label} (confidence: {top_conf:.4f})")
+
+        return {
+            'top_label': top_label,
+            'top_conf': top_conf,
+            'probs': probs.tolist(),
+            'labels': letters_labels
+        }
+    except Exception as e:
+        print(f"Letters inference error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post('/infer/ensemble')
