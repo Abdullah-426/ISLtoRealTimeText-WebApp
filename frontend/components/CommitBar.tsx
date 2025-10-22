@@ -8,7 +8,10 @@ export function CommitBar() {
 
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
-            if (e.code === 'Space') { e.preventDefault(); toggleHold(); }
+            // Do not block spacebar when typing inside inputs/textareas
+            const target = e.target as HTMLElement | null;
+            const isTyping = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.getAttribute('contenteditable') === 'true');
+            if (!isTyping && e.code === 'Space') { e.preventDefault(); toggleHold(); }
             if (e.ctrlKey && e.key === 'Enter') { useStore.getState().commitNow(); }
             if (e.ctrlKey && (e.key.toLowerCase() === 'z')) { useStore.getState().undo(); }
         };

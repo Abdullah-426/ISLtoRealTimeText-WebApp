@@ -1,61 +1,68 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from typing import List, Optional, Union
-import os
 from fastapi.middleware.cors import CORSMiddleware
-from llm_client import normalize_with_llm, RuleBasedNormalizer
+from pydantic import BaseModel
+import os
+from dotenv import load_dotenv
+from llm_client import process_with_groq
 
-app = FastAPI(title='ISL Postprocess', version='0.2.0')
-app.add_middleware(CORSMiddleware, allow_origins=[
-                   '*'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
+# Load environment variables
+load_dotenv()
 
-SYSTEM_PROMPT = (
-    "You are a text normalizer. Input: tokenized core words from Indian Sign Language. "
-    "Output: one natural sentence with minimal extra words, correct punctuation, and unchanged facts. "
-    "Do not hallucinate new information."
+app = FastAPI(title="ISL Post-processing Service", version="0.1.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
-class PostReq(BaseModel):
-    raw_tokens: Union[List[str],
-                      str] = Field(..., description='Committed tokens or raw string')
-    lang: Optional[str] = Field(default='en', description='en|hi (optional)')
-    style: Optional[str] = Field(
-        default='simple', description='simple|formal (optional)')
+class PostProcessRequest(BaseModel):
+    raw_tokens: str
+    lang: str = "en"
 
 
-class PostResp(BaseModel):
+class PostProcessResponse(BaseModel):
     text: str
-    note: Optional[str] = None
+    success: bool
+    error: str = ""
 
 
-@app.get('/')
-def health():
-    return {"ok": True}
+@app.get("/")
+def health_check():
+    return {"status": "healthy", "service": "postprocess"}
 
 
-@app.post('/postprocess', response_model=PostResp)
-async def postprocess(req: PostReq):
-    provider = os.getenv('LLM_PROVIDER', 'local').lower()
-    openai_key = os.getenv('OPENAI_API_KEY')
-    groq_key = os.getenv('GROQ_API_KEY')
-    local_url = os.getenv('LOCAL_GPT_URL', 'http://localhost:8001')
+@app.post("/postprocess", response_model=PostProcessResponse)
+def postprocess_text(request: PostProcessRequest):
+    try:
+        if not request.raw_tokens.strip():
+            return PostProcessResponse(
+                text="",
+                success=True,
+                error=""
+            )
 
-    raw_str = req.raw_tokens if isinstance(
-        req.raw_tokens, str) else ' '.join(req.raw_tokens)
-    raw_str = raw_str.strip()
-    if not raw_str:
-        raise HTTPException(status_code=400, detail='raw_tokens required')
+        # Process with Groq API
+        processed_text = process_with_groq(request.raw_tokens)
 
-    if provider == 'openai' and not openai_key:
-        text = RuleBasedNormalizer()(raw_str)
-        return PostResp(text=text, note='OPENAI_API_KEY missing; used rule-based fallback')
-    if provider == 'groq' and not groq_key:
-        text = RuleBasedNormalizer()(raw_str)
-        return PostResp(text=text, note='GROQ_API_KEY missing; used rule-based fallback')
+        return PostProcessResponse(
+            text=processed_text,
+            success=True,
+            error=""
+        )
 
-    text = await normalize_with_llm(
-        raw=raw_str, provider=provider, openai_key=openai_key, groq_key=groq_key, local_url=local_url,
-        system_prompt=SYSTEM_PROMPT, lang=req.lang or 'en', style=req.style or 'simple'
-    )
-    return PostResp(text=text)
+    except Exception as e:
+        return PostProcessResponse(
+            text="",
+            success=False,
+            error=str(e)
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

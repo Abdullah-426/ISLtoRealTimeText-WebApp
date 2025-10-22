@@ -8,6 +8,7 @@ import { AnomalousMatterHero } from '@/components/anomalous-matter-hero';
 import { CreatorsCarousel } from '@/components/creators-carousel';
 import { GridFeatureCards } from '@/components/grid-feature-cards';
 import { DottedSurface } from '@/components/dotted-surface';
+import ProcessedBar from '@/components/ProcessedBar';
 
 export default function Page() {
     return (
@@ -52,6 +53,11 @@ export default function Page() {
                         <TopK />
                         <TypedBar />
                     </div>
+                </div>
+
+                {/* Processed output spans full width below transcript/settings section */}
+                <div className='mx-auto max-w-6xl mt-6'>
+                    <ProcessedBar />
                 </div>
             </section>
 

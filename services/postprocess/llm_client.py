@@ -1,69 +1,79 @@
-from typing import Optional
 import os
-import httpx
+import requests
+from typing import Optional
 
 
-class RuleBasedNormalizer:
-    def __call__(self, raw: str) -> str:
-        s = raw.strip().upper()
-        if s in {'HELLO HOW YOU', 'HELLO HOW ARE YOU'}:
-            return 'Hello, how are you?'
-        if s == 'WHAT NAME YOU':
-            return 'What is your name?'
-        if s == 'WHERE TOILET':
-            return 'Where is the toilet?'
-        out = raw.strip().capitalize()
-        if not out.endswith(('.', '!', '?')):
-            out += '.'
-        return out
+def process_with_groq(raw_tokens: str) -> str:
+    """
+    Process raw ISL tokens using Groq API to generate coherent sentences.
+    """
+    groq_api_key = os.getenv("GROQ_API_KEY")
 
+    if not groq_api_key or groq_api_key == "<APIKEY>":
+        raise ValueError("GROQ_API_KEY not set in environment variables")
 
-async def normalize_with_llm(*, raw: str, provider: str, openai_key: Optional[str], groq_key: Optional[str], local_url: str, system_prompt: str, lang: str, style: str) -> str:
-    provider = provider.lower()
-    if provider == 'local':
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                r = await client.post(local_url, json={"system": system_prompt, "input": raw, "lang": lang, "style": style})
-                if r.status_code == 200:
-                    return (r.json().get('text') or r.text).strip()
-        except Exception:
-            pass
-        return RuleBasedNormalizer()(raw)
+    # Create a comprehensive prompt for ISL text normalization
+    prompt = f"""You are an expert in Indian Sign Language (ISL) text processing. Your task is to convert raw ISL tokens into coherent, grammatically correct English sentences.
 
-    if provider == 'openai':
-        assert openai_key, 'OPENAI_API_KEY required'
-        headers = {"Authorization": f"Bearer {openai_key}",
-                   "Content-Type": "application/json"}
-        payload = {
-            "model": os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"lang={lang}; style={style}; raw={raw}"}
-            ],
-            "temperature": 0.2
-        }
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post('https://api.openai.com/v1/chat/completions', headers=headers, json=payload)
-            r.raise_for_status()
-            data = r.json()
-            return data['choices'][0]['message']['content'].strip()
+ISL tokens are typically individual words or phrases without connecting words, articles, or proper sentence structure. Your job is to:
 
-    if provider == 'groq':
-        assert groq_key, 'GROQ_API_KEY required'
-        headers = {"Authorization": f"Bearer {groq_key}",
-                   "Content-Type": "application/json"}
-        payload = {
-            "model": os.getenv('GROQ_MODEL', 'llama-3.1-70b-versatile'),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"lang={lang}; style={style}; raw={raw}"}
-            ],
-            "temperature": 0.2
-        }
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post('https://api.groq.com/openai/v1/chat/completions', headers=headers, json=payload)
-            r.raise_for_status()
-            data = r.json()
-            return data['choices'][0]['message']['content'].strip()
+1. Identify the core meaning and intent
+2. Add appropriate connecting words, articles, and grammar
+3. Create natural, fluent English sentences
+4. Maintain the original meaning while making it readable
 
-    return RuleBasedNormalizer()(raw)
+Raw ISL tokens: "{raw_tokens}"
+
+Please convert this into a coherent English sentence. If the input is already well-formed, just return it as-is. If it's unclear or incomplete, make your best interpretation.
+
+Response (only the processed text, no explanations):"""
+
+    headers = {
+        "Authorization": f"Bearer {groq_api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 200,
+        "stream": False
+    }
+
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            raise Exception(
+                f"Groq API error: {response.status_code} - {response.text}")
+
+        result = response.json()
+
+        if "choices" not in result or not result["choices"]:
+            raise Exception("No response from Groq API")
+
+        processed_text = result["choices"][0]["message"]["content"].strip()
+
+        # Fallback if empty response
+        if not processed_text:
+            processed_text = raw_tokens
+
+        return processed_text
+
+    except requests.exceptions.Timeout:
+        raise Exception("Request to Groq API timed out")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Network error: {str(e)}")
+    except Exception as e:
+        raise Exception(f"Error processing with Groq: {str(e)}")
