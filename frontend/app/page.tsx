@@ -1,4 +1,6 @@
+'use client';
 import { ModeSwitch } from '@/components/ModeSwitch';
+import { PhraseModeSwitch } from '@/components/PhraseModeSwitch';
 import { TopK } from '@/components/TopK';
 import { TypedBar } from '@/components/TypedBar';
 import { CommitBar } from '@/components/CommitBar';
@@ -9,8 +11,12 @@ import { CreatorsCarousel } from '@/components/creators-carousel';
 import { GridFeatureCards } from '@/components/grid-feature-cards';
 import { DottedSurface } from '@/components/dotted-surface';
 import ProcessedBar from '@/components/ProcessedBar';
+import { useStore } from '@/lib/store';
+import { motion, AnimatePresence } from 'framer-motion';
 
 export default function Page() {
+    const mode = useStore((s: any) => s.mode);
+
     return (
         <main className='min-h-screen text-white relative z-10'>
             <AnomalousMatterHero />
@@ -48,7 +54,33 @@ export default function Page() {
                                 <h1 className='font-display text-2xl'>ISL → Text</h1>
                                 <ModeSwitch />
                             </div>
-                            <p className='text-sm text-gray-400 mt-2'>Client-side landmarks + TF.js letters. Phrases inferred server-side. Only committed tokens/feature windows are sent.</p>
+                            <div className='mt-2 min-h-[20px]'>
+                                <AnimatePresence mode="wait">
+                                    {mode === 'letters' ? (
+                                        <motion.p
+                                            key="letters-text"
+                                            initial={{ opacity: 0, y: 20 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            exit={{ opacity: 0, y: -20 }}
+                                            transition={{ duration: 0.3 }}
+                                            className='text-sm text-gray-400'
+                                        >
+                                            Client-side landmarks + TF.js letters. Phrases inferred server-side. Only committed tokens/feature windows are sent.
+                                        </motion.p>
+                                    ) : (
+                                        <motion.div
+                                            key="phrases-mode-switch"
+                                            initial={{ opacity: 0, y: 20 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            exit={{ opacity: 0, y: -20 }}
+                                            transition={{ duration: 0.3 }}
+                                            className='flex justify-end'
+                                        >
+                                            <PhraseModeSwitch />
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+                            </div>
                         </div>
                         <TopK />
                         <TypedBar />
