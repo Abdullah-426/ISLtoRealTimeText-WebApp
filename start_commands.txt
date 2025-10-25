@@ -15,3 +15,16 @@ npm run dev
 # Check if services are responding
 Invoke-WebRequest -Uri "http://localhost:8001/" -UseBasicParsing
 Invoke-WebRequest -Uri "http://localhost:8000/" -UseBasicParsing
+
+
+
+cd "E:\Data Science Project\ISLtoRealTimeText App v2\services\infer"
+python main.py
+
+
+cd "E:\Data Science Project\ISLtoRealTimeText App v2\services\postprocess"
+python main.py
+
+
+cd "E:\Data Science Project\ISLtoRealTimeText App v2\frontend"
+npm run dev

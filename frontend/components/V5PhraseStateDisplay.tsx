@@ -35,28 +35,44 @@ export function V5PhraseStateDisplay() {
         let showProgress = false;
 
         if (v5_state === 'wait_start') {
-            progress = v5_bothHandsCount / v5_start_hold_frames;
+            progress = v5_bothHandsCount / Math.max(1, v5_start_hold_frames);
             statusText = 'SHOW BOTH HANDS to start';
             progressColor = '#10b981'; // green
             showProgress = true;
         } else if (v5_state === 'capture') {
-            const elapsed = (currentTime - v5_segmentStartTime) / 1000;
-            const segmentDuration = v5_frames_per_segment / v5_target_fps;
-            progress = Math.min(1, elapsed / segmentDuration);
-            statusText = `CAPTURE: ${elapsed.toFixed(1)}s / ${segmentDuration.toFixed(1)}s`;
-            progressColor = '#10b981'; // green
-            showProgress = true;
+            // Ensure segmentStartTime is valid (not 0)
+            if (v5_segmentStartTime > 0) {
+                const elapsed = (currentTime - v5_segmentStartTime) / 1000;
+                const segmentDuration = v5_frames_per_segment / Math.max(1, v5_target_fps);
+                progress = Math.min(1, Math.max(0, elapsed / segmentDuration));
+                statusText = `CAPTURE: ${elapsed.toFixed(1)}s / ${segmentDuration.toFixed(1)}s`;
+                progressColor = '#10b981'; // green
+                showProgress = true;
+            } else {
+                statusText = 'CAPTURE: Initializing...';
+                progress = 0;
+                progressColor = '#10b981'; // green
+                showProgress = true;
+            }
         } else if (v5_state === 'predict') {
             statusText = 'PREDICTING...';
             progressColor = '#f59e0b'; // amber
             showProgress = false;
         } else if (v5_state === 'cooldown') {
-            const elapsed = (currentTime - v5_cooldownStartTime) / 1000;
-            const remain = Math.max(0, v5_segment_cooldown - elapsed);
-            progress = (v5_segment_cooldown - remain) / v5_segment_cooldown;
-            statusText = `COOLDOWN: ${remain.toFixed(1)}s`;
-            progressColor = '#f97316'; // orange
-            showProgress = true;
+            // Ensure cooldownStartTime is valid (not 0)
+            if (v5_cooldownStartTime > 0) {
+                const elapsed = (currentTime - v5_cooldownStartTime) / 1000;
+                const remain = Math.max(0, v5_segment_cooldown - elapsed);
+                progress = (v5_segment_cooldown - remain) / Math.max(0.1, v5_segment_cooldown);
+                statusText = `COOLDOWN: ${remain.toFixed(1)}s`;
+                progressColor = '#f97316'; // orange
+                showProgress = true;
+            } else {
+                statusText = 'COOLDOWN: Initializing...';
+                progress = 0;
+                progressColor = '#f97316'; // orange
+                showProgress = true;
+            }
         }
 
         return { progress, statusText, progressColor, showProgress };

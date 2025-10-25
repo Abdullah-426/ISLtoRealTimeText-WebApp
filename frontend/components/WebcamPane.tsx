@@ -32,7 +32,10 @@ export default function WebcamPane() {
                 const leftHandPresent = res.leftHandPresent || false;
                 const rightHandPresent = res.rightHandPresent || false;
 
-                if (mode === 'phrases') {
+                // Get current mode from store to ensure we have the latest value
+                const currentMode = useStore.getState().mode;
+
+                if (currentMode === 'phrases') {
                     // Use v5 phrase logic for phrases mode
                     onFeaturesV5({
                         vec1662: res.vec1662,
