@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@/lib/store';
 import { setupVision, runVisionFrame, resetVision } from '@/lib/vision';
 import { motion } from 'framer-motion';
-import { Camera, CameraOff } from 'lucide-react';
+import { Camera, CameraOff, Pause, Play } from 'lucide-react';
 
 export default function WebcamPane() {
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -13,6 +13,8 @@ export default function WebcamPane() {
     const [stream, setStream] = useState<MediaStream | null>(null);
     const animationFrameRef = useRef<number | null>(null);
     const onFeatures = useStore((s: any) => s.onFeatures);
+    const predictionsPaused = useStore((s: any) => s.predictionsPaused);
+    const togglePredictionsPaused = useStore((s: any) => s.togglePredictionsPaused);
 
     const startProcessingLoop = () => {
         const loop = async () => {
@@ -125,7 +127,9 @@ export default function WebcamPane() {
                     <div className='absolute inset-0 grid place-items-center text-gray-500'>Allow camera access…</div>
                 )}
                 {cameraOn && ready && (
-                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className='absolute bottom-2 right-2 bg-black/50 text-white text-xs rounded-full px-2 py-1'>Live</motion.div>
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className='absolute bottom-2 right-2 bg-black/50 text-white text-xs rounded-full px-2 py-1'>
+                        {predictionsPaused ? 'Paused' : 'Live'}
+                    </motion.div>
                 )}
                 {/* Camera Toggle Button */}
                 <button
@@ -135,6 +139,16 @@ export default function WebcamPane() {
                 >
                     {cameraOn ? <CameraOff className='w-4 h-4' /> : <Camera className='w-4 h-4' />}
                 </button>
+                {/* Predictions Pause/Resume Button */}
+                {cameraOn && ready && (
+                    <button
+                        onClick={togglePredictionsPaused}
+                        className='absolute bottom-2 left-2 bg-black/50 backdrop-blur-sm border border-white/10 text-white p-2 rounded-full hover:bg-black/70 transition-colors'
+                        aria-label={predictionsPaused ? 'Resume predictions' : 'Pause predictions'}
+                    >
+                        {predictionsPaused ? <Play className='w-4 h-4' /> : <Pause className='w-4 h-4' />}
+                    </button>
+                )}
             </div>
         </div>
     );
