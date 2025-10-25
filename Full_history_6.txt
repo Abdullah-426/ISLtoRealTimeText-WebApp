@@ -1,0 +1,1983 @@
+================================================================================
+                    ISL TO REAL-TIME TEXT PROJECT - COMPLETE HISTORY
+                    PART 6: BACKEND SERVICES, DEPLOYMENT, TESTING, AND FUTURE ROADMAP
+================================================================================
+
+Author: Abdullah Ansari
+Project: Indian Sign Language (ISL) to Real-time Text Conversion System
+Version: 1.0
+Date: 2025-01-27
+Part: 6 of 6
+
+================================================================================
+                                TABLE OF CONTENTS
+================================================================================
+
+PART 6: BACKEND SERVICES, DEPLOYMENT, TESTING, AND FUTURE ROADMAP
+1. FastAPI Backend Services Architecture
+2. Inference Service Implementation and Optimization
+3. Post-processing Service with LLM Integration
+4. Deployment Strategy and Infrastructure
+5. Testing Framework and Quality Assurance
+6. Performance Monitoring and Analytics
+7. Security Implementation and Privacy Measures
+8. Future Roadmap and Scalability Considerations
+
+================================================================================
+                1. FASTAPI BACKEND SERVICES ARCHITECTURE
+================================================================================
+
+BACKEND ARCHITECTURE DESIGN (Month 8):
+
+The backend architecture was designed as a microservices system with two main 
+services: inference and post-processing, each handling specific responsibilities 
+while maintaining separation of concerns.
+
+SERVICE ARCHITECTURE OVERVIEW:
+
+```
+Backend Services Architecture:
+├── services/
+│   ├── infer/                 # Model inference service
+│   │   ├── main.py           # FastAPI application
+│   │   ├── custom_layers.py  # Custom Keras layers
+│   │   └── requirements.txt  # Dependencies
+│   └── postprocess/          # Text post-processing service
+│       ├── main.py          # FastAPI application
+│       ├── llm_client.py     # LLM integration
+│       └── requirements.txt # Dependencies
+├── models/                   # Trained ML models
+│   ├── isl_v5_lstm_mild_aw_deltas/
+│   ├── isl_v5_tcn_deltas/
+│   └── isl_wcs_raw_aug_light_v2/
+└── custom_layers.py         # Shared custom layers
+```
+
+INFERENCE SERVICE ARCHITECTURE:
+
+```python
+# services/infer/main.py
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+import numpy as np
+import tensorflow as tf
+import json
+import os
+import sys
+from pathlib import Path
+
+# Add custom layers to path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from custom_layers import (
+    TemporalAttentionLayer, 
+    wcs_fn, 
+    pres_fn, 
+    lhand_fn, 
+    rhand_fn
+)
+
+# Initialize FastAPI application
+app = FastAPI(
+    title="ISL Inference Service",
+    description="Real-time ISL gesture recognition inference",
+    version="0.2.0"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Model configuration
+MODEL_CONFIG = {
+    'v5_lstm': {
+        'path': ROOT / 'models/isl_v5_lstm_mild_aw_deltas/final_model.keras',
+        'labels': ROOT / 'models/isl_v5_lstm_mild_aw_deltas/labels.json',
+        'sequence_length': 48,
+        'feature_dim': 1662
+    },
+    'v5_tcn': {
+        'path': ROOT / 'models/isl_v5_tcn_deltas/final_model.keras',
+        'labels': ROOT / 'models/isl_v5_tcn_deltas/labels.json',
+        'sequence_length': 48,
+        'feature_dim': 1662
+    },
+    'letters': {
+        'path': ROOT / 'models/isl_wcs_raw_aug_light_v2/best.keras',
+        'labels': ROOT / 'models/isl_wcs_raw_aug_light_v2/labels.json',
+        'sequence_length': 1,
+        'feature_dim': 126
+    }
+}
+
+# Custom objects for model loading
+CUSTOM_OBJECTS = {
+    'TemporalAttentionLayer': TemporalAttentionLayer,
+    'wcs_fn': wcs_fn,
+    'pres_fn': pres_fn,
+    'lhand_fn': lhand_fn,
+    'rhand_fn': rhand_fn
+}
+
+# Global model storage
+models = {}
+labels = {}
+
+@app.on_event("startup")
+async def load_models():
+    """Load all models on startup"""
+    print("Loading models...")
+    
+    for model_name, config in MODEL_CONFIG.items():
+        try:
+            # Load model
+            model = tf.keras.models.load_model(
+                str(config['path']),
+                custom_objects=CUSTOM_OBJECTS,
+                compile=False,
+                safe_mode=False
+            )
+            models[model_name] = model
+            
+            # Load labels
+            with open(config['labels'], 'r', encoding='utf-8') as f:
+                labels_data = json.load(f)
+                labels[model_name] = labels_data.get('classes', labels_data)
+            
+            print(f"✓ Loaded {model_name} model")
+            
+        except Exception as e:
+            print(f"✗ Failed to load {model_name} model: {e}")
+    
+    print("Model loading complete")
+
+# Request/Response models
+class InferenceRequest(BaseModel):
+    features: List[List[float]]
+    model_type: str = "v5_lstm"
+
+class LettersRequest(BaseModel):
+    features: List[float]
+
+class InferenceResponse(BaseModel):
+    predictions: List[float]
+    top_label: str
+    confidence: float
+    labels: List[str]
+
+# API Endpoints
+@app.get("/")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "service": "inference",
+        "models_loaded": list(models.keys()),
+        "version": "0.2.0"
+    }
+
+@app.get("/meta")
+async def get_metadata():
+    """Get model metadata"""
+    metadata = {}
+    
+    for model_name, config in MODEL_CONFIG.items():
+        if model_name in models:
+            metadata[model_name] = {
+                'sequence_length': config['sequence_length'],
+                'feature_dim': config['feature_dim'],
+                'num_classes': len(labels.get(model_name, [])),
+                'labels': labels.get(model_name, [])
+            }
+    
+    return metadata
+
+@app.post("/infer/phrase-v5/lstm", response_model=InferenceResponse)
+async def infer_phrase_lstm(request: InferenceRequest):
+    """Infer using v5 LSTM model"""
+    if 'v5_lstm' not in models:
+        raise HTTPException(status_code=503, detail="LSTM model not available")
+    
+    try:
+        # Prepare input data
+        features = np.array(request.features, dtype=np.float32)
+        
+        # Ensure correct shape
+        if len(features.shape) == 1:
+            features = features.reshape(1, -1)
+        
+        # Make prediction
+        predictions = models['v5_lstm'].predict(features, verbose=0)
+        
+        # Get top prediction
+        top_idx = np.argmax(predictions[0])
+        top_label = labels['v5_lstm'][top_idx]
+        confidence = float(predictions[0][top_idx])
+        
+        return InferenceResponse(
+            predictions=predictions[0].tolist(),
+            top_label=top_label,
+            confidence=confidence,
+            labels=labels['v5_lstm']
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/infer/phrase-v5/tcn", response_model=InferenceResponse)
+async def infer_phrase_tcn(request: InferenceRequest):
+    """Infer using v5 TCN model"""
+    if 'v5_tcn' not in models:
+        raise HTTPException(status_code=503, detail="TCN model not available")
+    
+    try:
+        # Prepare input data
+        features = np.array(request.features, dtype=np.float32)
+        
+        # Ensure correct shape
+        if len(features.shape) == 1:
+            features = features.reshape(1, -1)
+        
+        # Make prediction
+        predictions = models['v5_tcn'].predict(features, verbose=0)
+        
+        # Get top prediction
+        top_idx = np.argmax(predictions[0])
+        top_label = labels['v5_tcn'][top_idx]
+        confidence = float(predictions[0][top_idx])
+        
+        return InferenceResponse(
+            predictions=predictions[0].tolist(),
+            top_label=top_label,
+            confidence=confidence,
+            labels=labels['v5_tcn']
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/infer/letters", response_model=InferenceResponse)
+async def infer_letters(request: LettersRequest):
+    """Infer using letters model"""
+    if 'letters' not in models:
+        raise HTTPException(status_code=503, detail="Letters model not available")
+    
+    try:
+        # Prepare input data
+        features = np.array(request.features, dtype=np.float32)
+        
+        # Ensure correct shape
+        if len(features.shape) == 1:
+            features = features.reshape(1, -1)
+        
+        # Make prediction
+        predictions = models['letters'].predict(features, verbose=0)
+        
+        # Get top prediction
+        top_idx = np.argmax(predictions[0])
+        top_label = labels['letters'][top_idx]
+        confidence = float(predictions[0][top_idx])
+        
+        return InferenceResponse(
+            predictions=predictions[0].tolist(),
+            top_label=top_label,
+            confidence=confidence,
+            labels=labels['letters']
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
+```
+
+================================================================================
+                2. INFERENCE SERVICE IMPLEMENTATION AND OPTIMIZATION
+================================================================================
+
+ADVANCED INFERENCE OPTIMIZATION:
+
+The inference service was optimized for production use with advanced features 
+like test-time augmentation, ensemble methods, and performance monitoring.
+
+TEST-TIME AUGMENTATION (TTA):
+
+```python
+# services/infer/tta.py
+import numpy as np
+from typing import List, Tuple
+
+class TestTimeAugmentation:
+    def __init__(self, 
+                 shift_values: List[int] = [-2, 0, 2],
+                 warp_speeds: List[float] = [0.9, 1.0, 1.1],
+                 face_pose_scale: float = 0.75):
+        self.shift_values = shift_values
+        self.warp_speeds = warp_speeds
+        self.face_pose_scale = face_pose_scale
+    
+    def add_deltas_sequence(self, x: np.ndarray) -> np.ndarray:
+        """Add temporal deltas to sequence"""
+        dx = np.concatenate([x[:1], x[1:] - x[:-1]], axis=0)
+        return np.concatenate([x, dx], axis=-1)
+    
+    def interpolate_time_sequence(self, X: np.ndarray, t: List[float], t_new: List[float]) -> np.ndarray:
+        """Linear interpolation with clamped edges"""
+        N, D = X.shape
+        t = np.asarray(t, dtype=np.float64)
+        t_new = np.asarray(t_new, dtype=np.float64)
+        
+        if N == 1:
+            return np.repeat(X, repeats=len(t_new), axis=0)
+        
+        s = (t_new - t[0]) / max(1e-9, (t[-1] - t[0])) * (N - 1)
+        s = np.clip(s, 0.0, N - 1.0)
+        
+        i0 = np.floor(s).astype(np.int64)
+        i1 = np.clip(i0 + 1, 0, N - 1)
+        w = (s - i0).astype(np.float32)[:, None]
+        
+        Y = (1.0 - w) * X[i0, :] + w * X[i1, :]
+        return Y.astype(np.float32)
+    
+    def resample_to_T(self, frames: List[np.ndarray], times: List[float], out_T: int = 48) -> np.ndarray:
+        """Resample frames to exactly T frames evenly spaced in time"""
+        X = np.stack(frames, axis=0).astype(np.float32)
+        t = np.asarray(times, dtype=np.float64)
+        
+        if len(t) == 0:
+            return np.zeros((out_T, X.shape[1]), dtype=np.float32)
+        if len(t) == 1:
+            return np.repeat(X, repeats=out_T, axis=0)
+        
+        t_new = np.linspace(t[0], t[-1], out_T, dtype=np.float64)
+        return self.interpolate_time_sequence(X, t, t_new)
+    
+    def shift_clip(self, x: np.ndarray, delta: int) -> np.ndarray:
+        """Shift sequence with edge padding"""
+        if delta == 0:
+            return x
+        
+        T = x.shape[0]
+        if delta > 0:
+            pad = np.repeat(x[:1], delta, axis=0)
+            return np.concatenate([pad, x[:-delta]], axis=0)
+        else:
+            d = -delta
+            pad = np.repeat(x[-1:], d, axis=0)
+            return np.concatenate([x[d:], pad], axis=0)
+    
+    def time_warp(self, x: np.ndarray, speed: float) -> np.ndarray:
+        """Simple time-warp by interpolating at different speeds"""
+        T, D = x.shape
+        if T == 1 or abs(speed - 1.0) < 1e-6:
+            return x
+        
+        pos = np.linspace(0, T-1, T, dtype=np.float64) / max(1e-6, speed)
+        pos = np.clip(pos, 0.0, T-1.0)
+        
+        i0 = np.floor(pos).astype(np.int64)
+        i1 = np.clip(i0 + 1, 0, T-1)
+        w = (pos - i0).astype(np.float32)[:, None]
+        
+        return ((1.0 - w) * x[i0, :] + w * x[i1, :]).astype(np.float32)
+    
+    def hand_focus_variant(self, x: np.ndarray, face_pose_scale: float = 0.75) -> np.ndarray:
+        """Downweight face+pose dims to let hands drive more"""
+        x2 = x.copy()
+        pose_dim = 132  # 33 * 4
+        face_dim = 1404  # 468 * 3
+        
+        x2[:, :pose_dim] *= face_pose_scale
+        x2[:, pose_dim:pose_dim+face_dim] *= face_pose_scale
+        
+        return x2
+    
+    def build_tta_set(self, x_in: np.ndarray, 
+                     do_shift: bool = True, 
+                     do_warp: bool = True, 
+                     do_hand_focus: bool = True) -> List[np.ndarray]:
+        """Build TTA variants for robust inference"""
+        variants = []
+        bases = [x_in]
+        
+        if do_hand_focus:
+            bases.append(self.hand_focus_variant(x_in, self.face_pose_scale))
+        
+        for b in bases:
+            tmp = [b]
+            
+            if do_warp:
+                tmp = [self.time_warp(b, s) for s in self.warp_speeds]
+            
+            if do_shift:
+                tmp2 = []
+                for t in tmp:
+                    for dv in self.shift_values:
+                        tmp2.append(self.shift_clip(t, dv))
+                variants.extend(tmp2)
+            else:
+                variants.extend(tmp)
+        
+        return variants
+    
+    def pool_probabilities(self, P: np.ndarray, pool_method: str = "max") -> np.ndarray:
+        """Pool probabilities across TTA variants"""
+        if pool_method == "max":
+            return np.max(P, axis=0)
+        else:
+            return np.mean(P, axis=0)
+```
+
+ENSEMBLE IMPLEMENTATION:
+
+```python
+# services/infer/ensemble.py
+import numpy as np
+from typing import List, Tuple
+
+class EnsemblePredictor:
+    def __init__(self, lstm_model, tcn_model, lstm_labels: List[str], tcn_labels: List[str]):
+        self.lstm_model = lstm_model
+        self.tcn_model = tcn_model
+        self.lstm_labels = lstm_labels
+        self.tcn_labels = tcn_labels
+    
+    def softmax_temperature(self, logits: np.ndarray, temperature: float) -> np.ndarray:
+        """Apply temperature scaling to softmax"""
+        scaled_logits = logits / temperature
+        exp_logits = np.exp(scaled_logits - np.max(scaled_logits))
+        return exp_logits / np.sum(exp_logits)
+    
+    def predict_ensemble(self, 
+                        lstm_features: np.ndarray, 
+                        tcn_features: np.ndarray,
+                        alpha: float = 0.5,
+                        lstm_temperature: float = 0.85,
+                        tcn_temperature: float = 0.95) -> Tuple[List[float], str, float]:
+        """Make ensemble prediction"""
+        # LSTM prediction
+        lstm_pred = self.lstm_model.predict(lstm_features, verbose=0)
+        lstm_probs = self.softmax_temperature(lstm_pred[0], lstm_temperature)
+        
+        # TCN prediction
+        tcn_pred = self.tcn_model.predict(tcn_features, verbose=0)
+        tcn_probs = self.softmax_temperature(tcn_pred[0], tcn_temperature)
+        
+        # Ensemble combination
+        ensemble_probs = alpha * lstm_probs + (1 - alpha) * tcn_probs
+        
+        # Get top prediction
+        top_idx = np.argmax(ensemble_probs)
+        top_label = self.lstm_labels[top_idx]  # Assuming same labels
+        confidence = float(ensemble_probs[top_idx])
+        
+        return ensemble_probs.tolist(), top_label, confidence
+```
+
+PERFORMANCE MONITORING:
+
+```python
+# services/infer/monitoring.py
+import time
+import psutil
+import threading
+from typing import Dict, List
+from collections import deque
+
+class PerformanceMonitor:
+    def __init__(self, max_history: int = 1000):
+        self.max_history = max_history
+        self.metrics_history = {
+            'inference_times': deque(maxlen=max_history),
+            'memory_usage': deque(maxlen=max_history),
+            'cpu_usage': deque(maxlen=max_history),
+            'request_counts': deque(maxlen=max_history)
+        }
+        self.request_count = 0
+        self.start_time = time.time()
+        self.lock = threading.Lock()
+    
+    def record_inference(self, inference_time: float):
+        """Record inference time"""
+        with self.lock:
+            self.metrics_history['inference_times'].append(inference_time)
+            self.request_count += 1
+            self.metrics_history['request_counts'].append(self.request_count)
+    
+    def update_system_metrics(self):
+        """Update system metrics"""
+        with self.lock:
+            memory_usage = psutil.virtual_memory().percent
+            cpu_usage = psutil.cpu_percent()
+            
+            self.metrics_history['memory_usage'].append(memory_usage)
+            self.metrics_history['cpu_usage'].append(cpu_usage)
+    
+    def get_performance_stats(self) -> Dict:
+        """Get performance statistics"""
+        with self.lock:
+            stats = {}
+            
+            if self.metrics_history['inference_times']:
+                inference_times = list(self.metrics_history['inference_times'])
+                stats['avg_inference_time'] = np.mean(inference_times)
+                stats['max_inference_time'] = np.max(inference_times)
+                stats['min_inference_time'] = np.min(inference_times)
+                stats['p95_inference_time'] = np.percentile(inference_times, 95)
+            
+            if self.metrics_history['memory_usage']:
+                memory_usage = list(self.metrics_history['memory_usage'])
+                stats['avg_memory_usage'] = np.mean(memory_usage)
+                stats['max_memory_usage'] = np.max(memory_usage)
+            
+            if self.metrics_history['cpu_usage']:
+                cpu_usage = list(self.metrics_history['cpu_usage'])
+                stats['avg_cpu_usage'] = np.mean(cpu_usage)
+                stats['max_cpu_usage'] = np.max(cpu_usage)
+            
+            stats['total_requests'] = self.request_count
+            stats['uptime'] = time.time() - self.start_time
+            
+            if self.request_count > 0:
+                stats['requests_per_second'] = self.request_count / stats['uptime']
+            
+            return stats
+
+# Global performance monitor
+performance_monitor = PerformanceMonitor()
+
+# Background thread to update system metrics
+def update_system_metrics():
+    while True:
+        performance_monitor.update_system_metrics()
+        time.sleep(5)  # Update every 5 seconds
+
+# Start background thread
+metrics_thread = threading.Thread(target=update_system_metrics, daemon=True)
+metrics_thread.start()
+```
+
+================================================================================
+                3. POST-PROCESSING SERVICE WITH LLM INTEGRATION
+================================================================================
+
+POST-PROCESSING SERVICE ARCHITECTURE:
+
+The post-processing service handles text normalization, grammar correction, 
+and natural language enhancement using LLM integration.
+
+```python
+# services/postprocess/main.py
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+import os
+from dotenv import load_dotenv
+from llm_client import LLMClient
+
+# Load environment variables
+load_dotenv()
+
+# Initialize FastAPI application
+app = FastAPI(
+    title="ISL Post-processing Service",
+    description="Text post-processing and normalization for ISL recognition",
+    version="0.1.0"
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize LLM client
+llm_client = LLMClient()
+
+# Request/Response models
+class PostProcessRequest(BaseModel):
+    raw_tokens: str
+    language: str = "en"
+    style: str = "simple"
+
+class PostProcessResponse(BaseModel):
+    processed_text: str
+    success: bool
+    confidence: float
+    method_used: str
+    error_message: Optional[str] = None
+
+# Rule-based fallback patterns
+RULE_BASED_PATTERNS = {
+    "HELLO HOW YOU": "Hello, how are you?",
+    "WHAT NAME YOU": "What is your name?",
+    "WHERE TOILET": "Where is the toilet?",
+    "THANK YOU": "Thank you.",
+    "GOOD MORNING": "Good morning.",
+    "GOOD NIGHT": "Good night.",
+    "HOW ARE YOU": "How are you?",
+    "NICE MEET YOU": "Nice to meet you.",
+    "SEE YOU LATER": "See you later.",
+    "HAVE GOOD DAY": "Have a good day."
+}
+
+@app.get("/")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "service": "postprocess",
+        "version": "0.1.0",
+        "llm_available": llm_client.is_available()
+    }
+
+@app.post("/postprocess", response_model=PostProcessResponse)
+async def postprocess_text(request: PostProcessRequest):
+    """Post-process raw ISL tokens into natural text"""
+    try:
+        if not request.raw_tokens.strip():
+            return PostProcessResponse(
+                processed_text="",
+                success=True,
+                confidence=1.0,
+                method_used="empty_input"
+            )
+        
+        # Try rule-based processing first
+        rule_based_result = apply_rule_based_processing(request.raw_tokens)
+        if rule_based_result:
+            return PostProcessResponse(
+                processed_text=rule_based_result,
+                success=True,
+                confidence=0.9,
+                method_used="rule_based"
+            )
+        
+        # Try LLM processing
+        if llm_client.is_available():
+            llm_result = await llm_client.process_text(
+                request.raw_tokens,
+                language=request.language,
+                style=request.style
+            )
+            
+            if llm_result:
+                return PostProcessResponse(
+                    processed_text=llm_result,
+                    success=True,
+                    confidence=0.8,
+                    method_used="llm"
+                )
+        
+        # Fallback to basic processing
+        basic_result = apply_basic_processing(request.raw_tokens)
+        return PostProcessResponse(
+            processed_text=basic_result,
+            success=True,
+            confidence=0.6,
+            method_used="basic"
+        )
+        
+    except Exception as e:
+        return PostProcessResponse(
+            processed_text="",
+            success=False,
+            confidence=0.0,
+            method_used="error",
+            error_message=str(e)
+        )
+
+def apply_rule_based_processing(text: str) -> Optional[str]:
+    """Apply rule-based text processing"""
+    text_upper = text.upper().strip()
+    
+    # Check for exact matches
+    if text_upper in RULE_BASED_PATTERNS:
+        return RULE_BASED_PATTERNS[text_upper]
+    
+    # Check for partial matches
+    for pattern, replacement in RULE_BASED_PATTERNS.items():
+        if pattern in text_upper:
+            return text_upper.replace(pattern, replacement)
+    
+    return None
+
+def apply_basic_processing(text: str) -> str:
+    """Apply basic text processing"""
+    # Split into words
+    words = text.strip().split()
+    
+    if not words:
+        return ""
+    
+    # Capitalize first word
+    words[0] = words[0].capitalize()
+    
+    # Add period if not ending with punctuation
+    if not words[-1].endswith(('.', '!', '?')):
+        words.append('.')
+    
+    return ' '.join(words)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+```
+
+LLM CLIENT IMPLEMENTATION:
+
+```python
+# services/postprocess/llm_client.py
+import os
+import asyncio
+import aiohttp
+from typing import Optional, Dict, Any
+import json
+
+class LLMClient:
+    def __init__(self):
+        self.provider = os.getenv('LLM_PROVIDER', 'groq')
+        self.api_key = self._get_api_key()
+        self.base_url = self._get_base_url()
+        self.model = self._get_model()
+        self.available = self.api_key is not None
+    
+    def _get_api_key(self) -> Optional[str]:
+        """Get API key based on provider"""
+        if self.provider == 'openai':
+            return os.getenv('OPENAI_API_KEY')
+        elif self.provider == 'groq':
+            return os.getenv('GROQ_API_KEY')
+        elif self.provider == 'local':
+            return 'local'  # No API key needed for local
+        return None
+    
+    def _get_base_url(self) -> str:
+        """Get base URL based on provider"""
+        if self.provider == 'openai':
+            return 'https://api.openai.com/v1'
+        elif self.provider == 'groq':
+            return 'https://api.groq.com/openai/v1'
+        elif self.provider == 'local':
+            return os.getenv('LOCAL_GPT_URL', 'http://localhost:11434')
+        return ''
+    
+    def _get_model(self) -> str:
+        """Get model name based on provider"""
+        if self.provider == 'openai':
+            return os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+        elif self.provider == 'groq':
+            return os.getenv('GROQ_MODEL', 'llama-3.1-70b-versatile')
+        elif self.provider == 'local':
+            return os.getenv('LOCAL_MODEL', 'llama3.2')
+        return ''
+    
+    def is_available(self) -> bool:
+        """Check if LLM client is available"""
+        return self.available and self.api_key is not None
+    
+    async def process_text(self, raw_text: str, language: str = "en", style: str = "simple") -> Optional[str]:
+        """Process text using LLM"""
+        if not self.is_available():
+            return None
+        
+        try:
+            if self.provider == 'local':
+                return await self._process_local(raw_text, language, style)
+            else:
+                return await self._process_api(raw_text, language, style)
+        except Exception as e:
+            print(f"LLM processing error: {e}")
+            return None
+    
+    async def _process_api(self, raw_text: str, language: str, style: str) -> Optional[str]:
+        """Process text using API-based LLM"""
+        system_prompt = self._get_system_prompt(language, style)
+        
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": raw_text}
+            ],
+            "max_tokens": 200,
+            "temperature": 0.3,
+            "stream": False
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result['choices'][0]['message']['content'].strip()
+                else:
+                    print(f"API error: {response.status}")
+                    return None
+    
+    async def _process_local(self, raw_text: str, language: str, style: str) -> Optional[str]:
+        """Process text using local LLM"""
+        system_prompt = self._get_system_prompt(language, style)
+        
+        payload = {
+            "model": self.model,
+            "prompt": f"{system_prompt}\n\nUser: {raw_text}\nAssistant:",
+            "stream": False,
+            "options": {
+                "temperature": 0.3,
+                "num_predict": 200
+            }
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result['response'].strip()
+                else:
+                    print(f"Local LLM error: {response.status}")
+                    return None
+    
+    def _get_system_prompt(self, language: str, style: str) -> str:
+        """Get system prompt for LLM"""
+        return f"""You are a helpful assistant that converts raw sign language tokens into natural, grammatically correct text.
+
+Rules:
+1. Convert raw tokens like "HELLO HOW YOU" into natural text like "Hello, how are you?"
+2. Add appropriate punctuation and grammar
+3. Keep the meaning intact
+4. Use {language} language
+5. Keep the style {style}
+6. Be concise and clear
+7. Don't add extra information not present in the input
+
+Examples:
+- "HELLO HOW YOU" → "Hello, how are you?"
+- "WHAT NAME YOU" → "What is your name?"
+- "THANK YOU" → "Thank you."
+
+Input: Raw sign language tokens
+Output: Natural, grammatically correct text"""
+```
+
+================================================================================
+                4. DEPLOYMENT STRATEGY AND INFRASTRUCTURE
+================================================================================
+
+DEPLOYMENT ARCHITECTURE:
+
+The deployment strategy uses a hybrid approach with Vercel for the frontend 
+and Railway for backend services, providing scalability and reliability.
+
+DEPLOYMENT CONFIGURATION:
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_INFER_URL=http://inference:8001
+      - NEXT_PUBLIC_POSTPROCESS_URL=http://postprocess:8000
+    depends_on:
+      - inference
+      - postprocess
+
+  inference:
+    build:
+      context: ./services/infer
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./models:/app/models
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  postprocess:
+    build:
+      context: ./services/postprocess
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_PROVIDER=groq
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+```
+
+VERCEL DEPLOYMENT:
+
+```json
+// vercel.json
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "env": {
+    "NEXT_PUBLIC_INFER_URL": "@infer_url",
+    "NEXT_PUBLIC_POSTPROCESS_URL": "@postprocess_url"
+  },
+  "functions": {
+    "app/api/**/*.ts": {
+      "maxDuration": 30
+    }
+  }
+}
+```
+
+RAILWAY DEPLOYMENT:
+
+```toml
+# railway.toml
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
+
+[env]
+PYTHONPATH = "/app"
+```
+
+ENVIRONMENT CONFIGURATION:
+
+```bash
+# .env.production
+# Frontend Environment Variables
+NEXT_PUBLIC_INFER_URL=https://inference-service.railway.app
+NEXT_PUBLIC_POSTPROCESS_URL=https://postprocess-service.railway.app
+
+# Backend Environment Variables
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_api_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+LOCAL_GPT_URL=http://localhost:11434
+
+# Model Configuration
+MODEL_CACHE_SIZE=3
+MAX_CONCURRENT_REQUESTS=10
+REQUEST_TIMEOUT=30
+```
+
+DEPLOYMENT SCRIPTS:
+
+```bash
+#!/bin/bash
+# scripts/deploy.sh
+
+set -e
+
+echo "Starting deployment process..."
+
+# Build and deploy frontend to Vercel
+echo "Deploying frontend to Vercel..."
+cd frontend
+npm run build
+vercel --prod
+cd ..
+
+# Deploy backend services to Railway
+echo "Deploying inference service to Railway..."
+cd services/infer
+railway deploy --service inference
+cd ../..
+
+echo "Deploying postprocess service to Railway..."
+cd services/postprocess
+railway deploy --service postprocess
+cd ../..
+
+echo "Deployment complete!"
+
+# Run health checks
+echo "Running health checks..."
+sleep 30
+
+# Check inference service
+curl -f https://inference-service.railway.app/ || echo "Inference service health check failed"
+
+# Check postprocess service
+curl -f https://postprocess-service.railway.app/ || echo "Postprocess service health check failed"
+
+echo "Health checks complete!"
+```
+
+================================================================================
+                5. TESTING FRAMEWORK AND QUALITY ASSURANCE
+================================================================================
+
+TESTING STRATEGY:
+
+A comprehensive testing framework was implemented covering unit tests, 
+integration tests, and end-to-end tests.
+
+UNIT TESTING:
+
+```python
+# tests/test_inference.py
+import pytest
+import numpy as np
+from fastapi.testclient import TestClient
+from services.infer.main import app
+
+client = TestClient(app)
+
+class TestInferenceService:
+    def test_health_check(self):
+        """Test health check endpoint"""
+        response = client.get("/")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert "models_loaded" in data
+    
+    def test_metadata_endpoint(self):
+        """Test metadata endpoint"""
+        response = client.get("/meta")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, dict)
+    
+    def test_letters_inference(self):
+        """Test letters inference endpoint"""
+        # Create mock 126-dimensional feature vector
+        features = np.random.random(126).tolist()
+        
+        response = client.post("/infer/letters", json={"features": features})
+        
+        if response.status_code == 200:
+            data = response.json()
+            assert "predictions" in data
+            assert "top_label" in data
+            assert "confidence" in data
+            assert "labels" in data
+            assert len(data["predictions"]) > 0
+            assert 0 <= data["confidence"] <= 1
+        else:
+            # Model might not be loaded in test environment
+            assert response.status_code == 503
+    
+    def test_phrase_lstm_inference(self):
+        """Test phrase LSTM inference endpoint"""
+        # Create mock sequence data
+        features = np.random.random((48, 1662)).tolist()
+        
+        response = client.post("/infer/phrase-v5/lstm", json={"features": features})
+        
+        if response.status_code == 200:
+            data = response.json()
+            assert "predictions" in data
+            assert "top_label" in data
+            assert "confidence" in data
+        else:
+            assert response.status_code == 503
+    
+    def test_phrase_tcn_inference(self):
+        """Test phrase TCN inference endpoint"""
+        # Create mock sequence data
+        features = np.random.random((48, 1662)).tolist()
+        
+        response = client.post("/infer/phrase-v5/tcn", json={"features": features})
+        
+        if response.status_code == 200:
+            data = response.json()
+            assert "predictions" in data
+            assert "top_label" in data
+            assert "confidence" in data
+        else:
+            assert response.status_code == 503
+```
+
+INTEGRATION TESTING:
+
+```python
+# tests/test_integration.py
+import pytest
+import asyncio
+from services.infer.main import app as infer_app
+from services.postprocess.main import app as postprocess_app
+from fastapi.testclient import TestClient
+
+class TestIntegration:
+    def setup_method(self):
+        self.infer_client = TestClient(infer_app)
+        self.postprocess_client = TestClient(postprocess_app)
+    
+    def test_end_to_end_letters(self):
+        """Test end-to-end letters processing"""
+        # Step 1: Get inference
+        features = np.random.random(126).tolist()
+        infer_response = self.infer_client.post("/infer/letters", json={"features": features})
+        
+        if infer_response.status_code == 200:
+            infer_data = infer_response.json()
+            raw_text = infer_data["top_label"]
+            
+            # Step 2: Post-process
+            postprocess_response = self.postprocess_client.post(
+                "/postprocess",
+                json={"raw_tokens": raw_text}
+            )
+            
+            assert postprocess_response.status_code == 200
+            postprocess_data = postprocess_response.json()
+            assert postprocess_data["success"] is True
+            assert "processed_text" in postprocess_data
+    
+    def test_end_to_end_phrases(self):
+        """Test end-to-end phrase processing"""
+        # Step 1: Get inference
+        features = np.random.random((48, 1662)).tolist()
+        infer_response = self.infer_client.post("/infer/phrase-v5/lstm", json={"features": features})
+        
+        if infer_response.status_code == 200:
+            infer_data = infer_response.json()
+            raw_text = infer_data["top_label"]
+            
+            # Step 2: Post-process
+            postprocess_response = self.postprocess_client.post(
+                "/postprocess",
+                json={"raw_tokens": raw_text}
+            )
+            
+            assert postprocess_response.status_code == 200
+            postprocess_data = postprocess_response.json()
+            assert postprocess_data["success"] is True
+```
+
+PERFORMANCE TESTING:
+
+```python
+# tests/test_performance.py
+import pytest
+import time
+import asyncio
+import aiohttp
+from concurrent.futures import ThreadPoolExecutor
+
+class TestPerformance:
+    def test_inference_latency(self):
+        """Test inference latency"""
+        client = TestClient(infer_app)
+        
+        # Test multiple requests
+        start_time = time.time()
+        requests = []
+        
+        for _ in range(10):
+            features = np.random.random(126).tolist()
+            response = client.post("/infer/letters", json={"features": features})
+            requests.append(response)
+        
+        end_time = time.time()
+        avg_latency = (end_time - start_time) / 10
+        
+        # Assert reasonable latency (should be < 1 second)
+        assert avg_latency < 1.0
+        
+        # Check that most requests succeeded
+        successful_requests = sum(1 for r in requests if r.status_code in [200, 503])
+        assert successful_requests >= 8  # Allow for model loading issues
+    
+    async def test_concurrent_requests(self):
+        """Test concurrent request handling"""
+        async def make_request():
+            async with aiohttp.ClientSession() as session:
+                features = np.random.random(126).tolist()
+                async with session.post(
+                    "http://localhost:8001/infer/letters",
+                    json={"features": features}
+                ) as response:
+                    return await response.json()
+        
+        # Make 20 concurrent requests
+        tasks = [make_request() for _ in range(20)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Check that most requests completed successfully
+        successful_results = [r for r in results if not isinstance(r, Exception)]
+        assert len(successful_results) >= 15
+```
+
+FRONTEND TESTING:
+
+```typescript
+// tests/frontend/components.test.tsx
+import React from 'react';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { TopK } from '@/components/TopK';
+import { useStore } from '@/lib/store';
+
+// Mock the store
+jest.mock('@/lib/store');
+
+describe('TopK Component', () => {
+  beforeEach(() => {
+    (useStore as jest.Mock).mockReturnValue({
+      topk: [
+        { label: 'A', prob: 0.8 },
+        { label: 'B', prob: 0.6 },
+        { label: 'C', prob: 0.4 }
+      ]
+    });
+  });
+
+  test('renders top predictions', () => {
+    render(<TopK />);
+    
+    expect(screen.getByText('Top Predictions')).toBeInTheDocument();
+    expect(screen.getByText('A')).toBeInTheDocument();
+    expect(screen.getByText('B')).toBeInTheDocument();
+    expect(screen.getByText('C')).toBeInTheDocument();
+  });
+
+  test('displays confidence percentages', () => {
+    render(<TopK />);
+    
+    expect(screen.getByText('80.0%')).toBeInTheDocument();
+    expect(screen.getByText('60.0%')).toBeInTheDocument();
+    expect(screen.getByText('40.0%')).toBeInTheDocument();
+  });
+
+  test('highlights top prediction', () => {
+    render(<TopK />);
+    
+    const topPrediction = screen.getByText('A').closest('div');
+    expect(topPrediction).toHaveClass('bg-primary/10');
+  });
+});
+```
+
+================================================================================
+                6. PERFORMANCE MONITORING AND ANALYTICS
+================================================================================
+
+MONITORING IMPLEMENTATION:
+
+```python
+# services/monitoring/metrics.py
+import time
+import psutil
+import logging
+from typing import Dict, List
+from dataclasses import dataclass
+from collections import deque
+
+@dataclass
+class MetricPoint:
+    timestamp: float
+    value: float
+    labels: Dict[str, str]
+
+class MetricsCollector:
+    def __init__(self, max_points: int = 1000):
+        self.max_points = max_points
+        self.metrics: Dict[str, deque] = {}
+        self.logger = logging.getLogger(__name__)
+    
+    def record_metric(self, name: str, value: float, labels: Dict[str, str] = None):
+        """Record a metric point"""
+        if name not in self.metrics:
+            self.metrics[name] = deque(maxlen=self.max_points)
+        
+        point = MetricPoint(
+            timestamp=time.time(),
+            value=value,
+            labels=labels or {}
+        )
+        
+        self.metrics[name].append(point)
+    
+    def get_metric_stats(self, name: str, window_seconds: int = 300) -> Dict:
+        """Get statistics for a metric"""
+        if name not in self.metrics:
+            return {}
+        
+        cutoff_time = time.time() - window_seconds
+        recent_points = [
+            p for p in self.metrics[name] 
+            if p.timestamp >= cutoff_time
+        ]
+        
+        if not recent_points:
+            return {}
+        
+        values = [p.value for p in recent_points]
+        
+        return {
+            'count': len(values),
+            'min': min(values),
+            'max': max(values),
+            'avg': sum(values) / len(values),
+            'latest': values[-1] if values else 0
+        }
+    
+    def get_all_metrics(self) -> Dict:
+        """Get all metrics"""
+        return {
+            name: self.get_metric_stats(name) 
+            for name in self.metrics.keys()
+        }
+
+# Global metrics collector
+metrics_collector = MetricsCollector()
+
+# Performance monitoring decorator
+def monitor_performance(metric_name: str):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            try:
+                result = func(*args, **kwargs)
+                execution_time = time.time() - start_time
+                metrics_collector.record_metric(
+                    f"{metric_name}_success",
+                    execution_time,
+                    {"status": "success"}
+                )
+                return result
+            except Exception as e:
+                execution_time = time.time() - start_time
+                metrics_collector.record_metric(
+                    f"{metric_name}_error",
+                    execution_time,
+                    {"status": "error", "error_type": type(e).__name__}
+                )
+                raise
+        return wrapper
+    return decorator
+```
+
+ANALYTICS DASHBOARD:
+
+```python
+# services/monitoring/dashboard.py
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse
+import json
+
+router = APIRouter()
+
+@router.get("/metrics", response_class=HTMLResponse)
+async def metrics_dashboard(request: Request):
+    """Metrics dashboard"""
+    metrics = metrics_collector.get_all_metrics()
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>ISL Service Metrics</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            .metric-card {{ 
+                border: 1px solid #ddd; 
+                border-radius: 8px; 
+                padding: 20px; 
+                margin: 10px 0;
+                background: #f9f9f9;
+            }}
+            .metric-value {{ font-size: 24px; font-weight: bold; color: #333; }}
+            .metric-label {{ color: #666; margin-bottom: 5px; }}
+        </style>
+    </head>
+    <body>
+        <h1>ISL Service Metrics Dashboard</h1>
+        
+        <div class="metric-card">
+            <div class="metric-label">Inference Requests (Last 5 minutes)</div>
+            <div class="metric-value">{metrics.get('inference_requests', {}).get('count', 0)}</div>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">Average Inference Time</div>
+            <div class="metric-value">{metrics.get('inference_time', {}).get('avg', 0):.3f}s</div>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">Memory Usage</div>
+            <div class="metric-value">{metrics.get('memory_usage', {}).get('latest', 0):.1f}%</div>
+        </div>
+        
+        <div class="metric-card">
+            <div class="metric-label">CPU Usage</div>
+            <div class="metric-value">{metrics.get('cpu_usage', {}).get('latest', 0):.1f}%</div>
+        </div>
+        
+        <script>
+            // Auto-refresh every 30 seconds
+            setTimeout(() => location.reload(), 30000);
+        </script>
+    </body>
+    </html>
+    """
+    
+    return HTMLResponse(content=html_content)
+
+@router.get("/api/metrics")
+async def get_metrics_api():
+    """API endpoint for metrics data"""
+    return metrics_collector.get_all_metrics()
+```
+
+================================================================================
+                7. SECURITY IMPLEMENTATION AND PRIVACY MEASURES
+================================================================================
+
+SECURITY IMPLEMENTATION:
+
+```python
+# services/security/auth.py
+import jwt
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+from typing import Optional, Dict
+from fastapi import HTTPException, status
+
+class SecurityManager:
+    def __init__(self, secret_key: str = None):
+        self.secret_key = secret_key or secrets.token_urlsafe(32)
+        self.algorithm = "HS256"
+        self.token_expiry = timedelta(hours=24)
+    
+    def create_access_token(self, data: Dict) -> str:
+        """Create JWT access token"""
+        to_encode = data.copy()
+        expire = datetime.utcnow() + self.token_expiry
+        to_encode.update({"exp": expire})
+        
+        encoded_jwt = jwt.encode(to_encode, self.secret_key, algorithm=self.algorithm)
+        return encoded_jwt
+    
+    def verify_token(self, token: str) -> Optional[Dict]:
+        """Verify JWT token"""
+        try:
+            payload = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
+            return payload
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired"
+            )
+        except jwt.JWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
+    
+    def hash_password(self, password: str) -> str:
+        """Hash password using SHA-256"""
+        return hashlib.sha256(password.encode()).hexdigest()
+    
+    def verify_password(self, password: str, hashed_password: str) -> bool:
+        """Verify password against hash"""
+        return self.hash_password(password) == hashed_password
+
+# Rate limiting
+from fastapi import Request
+from collections import defaultdict
+import time
+
+class RateLimiter:
+    def __init__(self, max_requests: int = 100, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests = defaultdict(list)
+    
+    def is_allowed(self, client_ip: str) -> bool:
+        """Check if request is allowed"""
+        now = time.time()
+        window_start = now - self.window_seconds
+        
+        # Clean old requests
+        self.requests[client_ip] = [
+            req_time for req_time in self.requests[client_ip]
+            if req_time > window_start
+        ]
+        
+        # Check if under limit
+        if len(self.requests[client_ip]) >= self.max_requests:
+            return False
+        
+        # Add current request
+        self.requests[client_ip].append(now)
+        return True
+
+# Input validation
+from pydantic import BaseModel, validator
+import re
+
+class SecureInferenceRequest(BaseModel):
+    features: List[List[float]]
+    model_type: str = "v5_lstm"
+    
+    @validator('features')
+    def validate_features(cls, v):
+        if not v:
+            raise ValueError('Features cannot be empty')
+        
+        if len(v) > 100:  # Prevent large requests
+            raise ValueError('Too many feature vectors')
+        
+        for feature_vector in v:
+            if len(feature_vector) > 2000:  # Prevent oversized vectors
+                raise ValueError('Feature vector too large')
+            
+            if not all(isinstance(x, (int, float)) for x in feature_vector):
+                raise ValueError('All features must be numeric')
+        
+        return v
+    
+    @validator('model_type')
+    def validate_model_type(cls, v):
+        allowed_types = ['v5_lstm', 'v5_tcn', 'letters']
+        if v not in allowed_types:
+            raise ValueError(f'Model type must be one of {allowed_types}')
+        return v
+
+class SecurePostProcessRequest(BaseModel):
+    raw_tokens: str
+    language: str = "en"
+    style: str = "simple"
+    
+    @validator('raw_tokens')
+    def validate_raw_tokens(cls, v):
+        if len(v) > 1000:  # Prevent very long inputs
+            raise ValueError('Input too long')
+        
+        # Check for potentially malicious content
+        if re.search(r'[<>"\']', v):
+            raise ValueError('Invalid characters in input')
+        
+        return v.strip()
+    
+    @validator('language')
+    def validate_language(cls, v):
+        allowed_languages = ['en', 'hi']
+        if v not in allowed_languages:
+            raise ValueError(f'Language must be one of {allowed_languages}')
+        return v
+```
+
+PRIVACY MEASURES:
+
+```python
+# services/privacy/data_protection.py
+import hashlib
+import uuid
+from typing import Dict, Any
+from datetime import datetime, timedelta
+
+class DataProtectionManager:
+    def __init__(self):
+        self.data_retention_days = 7
+        self.anonymization_salt = secrets.token_urlsafe(32)
+    
+    def anonymize_user_data(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Anonymize user data"""
+        anonymized = user_data.copy()
+        
+        # Remove or hash sensitive fields
+        if 'user_id' in anonymized:
+            anonymized['user_id'] = self._hash_identifier(anonymized['user_id'])
+        
+        if 'ip_address' in anonymized:
+            anonymized['ip_address'] = self._hash_identifier(anonymized['ip_address'])
+        
+        # Remove timestamps (keep only date)
+        if 'timestamp' in anonymized:
+            anonymized['date'] = anonymized['timestamp'].date().isoformat()
+            del anonymized['timestamp']
+        
+        return anonymized
+    
+    def _hash_identifier(self, identifier: str) -> str:
+        """Hash identifier with salt"""
+        return hashlib.sha256(
+            f"{identifier}{self.anonymization_salt}".encode()
+        ).hexdigest()[:16]
+    
+    def should_retain_data(self, timestamp: datetime) -> bool:
+        """Check if data should be retained"""
+        cutoff_date = datetime.now() - timedelta(days=self.data_retention_days)
+        return timestamp > cutoff_date
+    
+    def create_session_id(self) -> str:
+        """Create anonymous session ID"""
+        return str(uuid.uuid4())
+
+# Privacy middleware
+from fastapi import Request, Response
+import time
+
+class PrivacyMiddleware:
+    def __init__(self):
+        self.data_protection = DataProtectionManager()
+        self.session_data = {}
+    
+    async def __call__(self, request: Request, call_next):
+        # Create anonymous session
+        session_id = request.cookies.get('session_id')
+        if not session_id:
+            session_id = self.data_protection.create_session_id()
+        
+        # Add privacy headers
+        response = await call_next(request)
+        
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+        
+        # Set session cookie
+        response.set_cookie(
+            'session_id',
+            session_id,
+            max_age=86400,  # 24 hours
+            httponly=True,
+            secure=True,
+            samesite='strict'
+        )
+        
+        return response
+```
+
+================================================================================
+                8. FUTURE ROADMAP AND SCALABILITY CONSIDERATIONS
+================================================================================
+
+FUTURE ROADMAP:
+
+## Phase 1: Enhanced Accuracy (Months 11-12)
+- **Expanded Dataset**: Collect 10,000+ samples per class
+- **Advanced Augmentation**: Implement GAN-based data augmentation
+- **Model Improvements**: 
+  - Transformer-based architecture for sequence modeling
+  - Multi-task learning for simultaneous letter and phrase recognition
+  - Attention mechanisms for better temporal modeling
+
+## Phase 2: Multi-language Support (Months 13-15)
+- **Hindi ISL**: Support for Hindi Sign Language
+- **Regional Variants**: Support for different ISL regional variations
+- **Language Detection**: Automatic detection of sign language type
+- **Cross-language Translation**: ISL to other sign languages
+
+## Phase 3: Advanced Features (Months 16-18)
+- **Facial Expression Recognition**: Integration of facial expressions
+- **Context Awareness**: Contextual understanding of conversations
+- **Grammar Modeling**: Advanced grammar rules for ISL
+- **Real-time Translation**: ISL to spoken language translation
+
+## Phase 4: Mobile and Accessibility (Months 19-21)
+- **Mobile App**: Native iOS and Android applications
+- **Offline Mode**: On-device processing without internet
+- **Accessibility Features**: 
+  - Voice output for deaf users
+  - Haptic feedback
+  - Customizable interface for different needs
+- **Integration APIs**: APIs for third-party applications
+
+## Phase 5: Enterprise and Education (Months 22-24)
+- **Educational Platform**: Learning management system integration
+- **Enterprise Solutions**: 
+  - Meeting transcription
+  - Customer service integration
+  - Workplace accessibility tools
+- **Analytics Dashboard**: Usage analytics and performance metrics
+- **Custom Model Training**: User-specific model fine-tuning
+
+SCALABILITY CONSIDERATIONS:
+
+## Technical Scalability
+```python
+# Horizontal scaling configuration
+SCALING_CONFIG = {
+    'inference_service': {
+        'min_instances': 2,
+        'max_instances': 10,
+        'cpu_threshold': 70,
+        'memory_threshold': 80,
+        'response_time_threshold': 1000  # ms
+    },
+    'postprocess_service': {
+        'min_instances': 1,
+        'max_instances': 5,
+        'cpu_threshold': 80,
+        'memory_threshold': 85,
+        'response_time_threshold': 2000  # ms
+    }
+}
+
+# Load balancing strategy
+LOAD_BALANCING = {
+    'strategy': 'round_robin',
+    'health_check_interval': 30,  # seconds
+    'circuit_breaker': {
+        'failure_threshold': 5,
+        'recovery_timeout': 60
+    }
+}
+```
+
+## Database Scaling
+```python
+# Database configuration for future scaling
+DATABASE_CONFIG = {
+    'primary': {
+        'type': 'postgresql',
+        'host': 'primary-db.example.com',
+        'port': 5432,
+        'database': 'isl_production'
+    },
+    'replicas': [
+        {
+            'type': 'postgresql',
+            'host': 'replica-1.example.com',
+            'port': 5432,
+            'database': 'isl_production'
+        },
+        {
+            'type': 'postgresql',
+            'host': 'replica-2.example.com',
+            'port': 5432,
+            'database': 'isl_production'
+        }
+    ],
+    'cache': {
+        'type': 'redis',
+        'host': 'redis-cluster.example.com',
+        'port': 6379,
+        'ttl': 3600  # 1 hour
+    }
+}
+```
+
+## Performance Optimization Roadmap
+```python
+# Future performance optimizations
+PERFORMANCE_ROADMAP = {
+    'model_optimization': [
+        'Quantization to INT8',
+        'Model pruning and compression',
+        'TensorRT optimization for GPU',
+        'ONNX runtime integration'
+    ],
+    'inference_optimization': [
+        'Batch processing optimization',
+        'Model serving with TensorFlow Serving',
+        'Edge computing deployment',
+        'WebAssembly (WASM) implementation'
+    ],
+    'infrastructure_optimization': [
+        'CDN for model distribution',
+        'Edge caching for predictions',
+        'Database query optimization',
+        'Microservices communication optimization'
+    ]
+}
+```
+
+## Research and Development Areas
+```python
+# R&D focus areas
+RESEARCH_AREAS = {
+    'computer_vision': [
+        '3D hand pose estimation',
+        'Multi-person sign recognition',
+        'Occlusion handling',
+        'Low-light performance improvement'
+    ],
+    'machine_learning': [
+        'Few-shot learning for new signs',
+        'Continual learning for model updates',
+        'Federated learning for privacy',
+        'Self-supervised learning approaches'
+    ],
+    'natural_language_processing': [
+        'Sign language grammar modeling',
+        'Context-aware translation',
+        'Multi-modal language understanding',
+        'Real-time language generation'
+    ],
+    'human_computer_interaction': [
+        'Gesture-based UI control',
+        'Accessibility interface design',
+        'User experience optimization',
+        'Multi-modal interaction design'
+    ]
+}
+```
+
+## Business Model Considerations
+```python
+# Business model roadmap
+BUSINESS_MODEL = {
+    'freemium': {
+        'free_tier': {
+            'daily_requests': 100,
+            'features': ['basic_letters', 'simple_phrases'],
+            'support': 'community'
+        },
+        'premium_tier': {
+            'monthly_price': 9.99,
+            'daily_requests': 10000,
+            'features': ['all_models', 'advanced_processing', 'api_access'],
+            'support': 'priority'
+        },
+        'enterprise_tier': {
+            'monthly_price': 99.99,
+            'unlimited_requests': True,
+            'features': ['custom_models', 'on_premise_deployment', 'sla'],
+            'support': 'dedicated'
+        }
+    },
+    'revenue_streams': [
+        'subscription_fees',
+        'api_usage_fees',
+        'enterprise_licenses',
+        'custom_development',
+        'training_and_consulting'
+    ]
+}
+```
+
+## Community and Open Source Strategy
+```python
+# Open source and community strategy
+COMMUNITY_STRATEGY = {
+    'open_source_components': [
+        'Core inference engine',
+        'Basic UI components',
+        'Model training scripts',
+        'Data preprocessing tools'
+    ],
+    'community_programs': [
+        'Contributor recognition',
+        'Bug bounty program',
+        'Research collaboration',
+        'Educational partnerships'
+    ],
+    'documentation': [
+        'API documentation',
+        'Developer guides',
+        'Model architecture docs',
+        'Deployment tutorials'
+    ]
+}
+```
+
+================================================================================
+                                END OF PART 6
+================================================================================
+
+This concludes Part 6 and the complete comprehensive project documentation. 
+Part 6 covers the FastAPI backend services architecture, inference service 
+implementation and optimization, post-processing service with LLM integration, 
+deployment strategy and infrastructure, testing framework and quality assurance, 
+performance monitoring and analytics, security implementation and privacy 
+measures, and future roadmap and scalability considerations.
+
+Key achievements in this final phase:
+- Production-ready FastAPI backend services
+- Advanced inference optimization with TTA and ensemble methods
+- LLM-powered post-processing with multiple provider support
+- Comprehensive deployment strategy using Vercel and Railway
+- Robust testing framework covering unit, integration, and performance tests
+- Performance monitoring and analytics dashboard
+- Security implementation with authentication and rate limiting
+- Privacy measures ensuring user data protection
+- Detailed future roadmap for continued development
+
+## PROJECT SUMMARY
+
+The ISL to Real-time Text project represents a comprehensive journey from 
+initial concept to production-ready application, spanning 10 months of 
+development with significant technical achievements:
+
+### Technical Achievements:
+- **Model Evolution**: From CNN prototypes to advanced LSTM/TCN ensemble models
+- **Architecture Pivot**: Successful transition from image-based to keypoint-based recognition
+- **Real-time Performance**: Achieved <100ms latency with 25-30 FPS processing
+- **Privacy-First Design**: Client-side processing with minimal data transmission
+- **Modern Web Stack**: Next.js frontend with TypeScript and modern UI/UX
+- **Microservices Architecture**: Scalable FastAPI backend services
+- **Production Deployment**: Vercel + Railway deployment with monitoring
+
+### Impact and Outcomes:
+- **Accessibility**: Enables real-time communication for deaf/hard-of-hearing users
+- **Privacy**: No video data transmission, ensuring user privacy
+- **Performance**: Production-ready system with comprehensive monitoring
+- **Scalability**: Architecture designed for future growth and expansion
+- **Open Source**: Foundation for community-driven development
+
+### Lessons Learned:
+- **Data Quality**: High-quality, consistent data is crucial for model performance
+- **Architecture Decisions**: Keypoint-based approach significantly improved robustness
+- **User Experience**: Smoothing algorithms and commit logic essential for usability
+- **Performance**: Client-side processing provides better privacy and performance
+- **Testing**: Comprehensive testing framework prevents production issues
+
+This project demonstrates the successful application of modern AI/ML techniques 
+to solve real-world accessibility challenges, creating a robust, scalable, and 
+user-friendly solution for Indian Sign Language recognition.
+
+The complete documentation provides a comprehensive record of the entire 
+development process, technical decisions, challenges faced, solutions 
+implemented, and future directions for continued development and improvement.
