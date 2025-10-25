@@ -1,7 +1,6 @@
 'use client';
 import { ModeSwitch } from '@/components/ModeSwitch';
 import { PhraseModeSwitch } from '@/components/PhraseModeSwitch';
-import PhraseV5ModeSwitch from '@/components/PhraseV5ModeSwitch';
 import { TopK } from '@/components/TopK';
 import { TypedBar } from '@/components/TypedBar';
 import { CommitBar } from '@/components/CommitBar';
@@ -76,14 +75,9 @@ export default function Page() {
                                             animate={{ opacity: 1, y: 0 }}
                                             exit={{ opacity: 0, y: -20 }}
                                             transition={{ duration: 0.3 }}
-                                            className='space-y-3'
+                                            className='flex justify-end'
                                         >
-                                            <div className='flex justify-end'>
-                                                <PhraseModeSwitch />
-                                            </div>
-                                            <div className='flex justify-end'>
-                                                <PhraseV5ModeSwitch />
-                                            </div>
+                                            <PhraseModeSwitch />
                                         </motion.div>
                                     )}
                                 </AnimatePresence>
