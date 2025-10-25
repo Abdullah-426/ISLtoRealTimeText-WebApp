@@ -46,24 +46,18 @@ class TemporalAttentionLayer(layers.Layer):
     def __init__(self, units=128, **kwargs):
         super().__init__(**kwargs)
         self.units = int(units)
-        self.W = layers.Dense(self.units, use_bias=True, name="attn_W")
-        self.v = layers.Dense(1,     use_bias=False, name="attn_v")
-        self._D = None
+        self.proj = layers.Dense(units, activation="tanh")
+        self.score = layers.Dense(1, activation=None)
+        self.softmax = layers.Softmax(axis=1)
 
-    def build(self, input_shape):
-        if len(input_shape) != 3:
-            raise ValueError(f"Expected (B,T,D); got {input_shape}")
-        self._D = int(input_shape[-1])
-        super().build(input_shape)
-
-    def call(self, x, training=None):
-        scores = self.v(tf.nn.tanh(self.W(x)))  # (B,T,1)
-        alpha = tf.nn.softmax(scores, axis=1)  # (B,T,1)
-        context = tf.reduce_sum(alpha * x, axis=1)  # (B,D)
-        return context
-
-    def compute_output_shape(self, input_shape):
-        return (input_shape[0], input_shape[-1])
+    def call(self, x, mask=None):
+        s = self.proj(x)
+        s = self.score(s)
+        if mask is not None:
+            mask_f = tf.cast(mask[:, :, None], dtype=s.dtype)
+            s = s + (1.0 - mask_f) * tf.constant(-1e9, dtype=s.dtype)
+        w = self.softmax(s)
+        return tf.reduce_sum(x * w, axis=1)
 
     def get_config(self):
         cfg = super().get_config()

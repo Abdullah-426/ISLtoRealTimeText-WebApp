@@ -1,11 +1,13 @@
 'use client';
 import { ModeSwitch } from '@/components/ModeSwitch';
 import { PhraseModeSwitch } from '@/components/PhraseModeSwitch';
+import PhraseV5ModeSwitch from '@/components/PhraseV5ModeSwitch';
 import { TopK } from '@/components/TopK';
 import { TypedBar } from '@/components/TypedBar';
 import { CommitBar } from '@/components/CommitBar';
 import WebcamPane from '@/components/WebcamPane';
 import { SettingsModal } from '@/components/SettingsModal';
+import { V5PhraseStateDisplay } from '@/components/V5PhraseStateDisplay';
 import { AnomalousMatterHero } from '@/components/anomalous-matter-hero';
 import { CreatorsCarousel } from '@/components/creators-carousel';
 import { GridFeatureCards } from '@/components/grid-feature-cards';
@@ -74,15 +76,44 @@ export default function Page() {
                                             animate={{ opacity: 1, y: 0 }}
                                             exit={{ opacity: 0, y: -20 }}
                                             transition={{ duration: 0.3 }}
-                                            className='flex justify-end'
+                                            className='space-y-3'
                                         >
-                                            <PhraseModeSwitch />
+                                            <div className='flex justify-end'>
+                                                <PhraseModeSwitch />
+                                            </div>
+                                            <div className='flex justify-end'>
+                                                <PhraseV5ModeSwitch />
+                                            </div>
                                         </motion.div>
                                     )}
                                 </AnimatePresence>
                             </div>
                         </div>
-                        <TopK />
+
+                        <AnimatePresence mode="wait">
+                            {mode === 'phrases' ? (
+                                <motion.div
+                                    key="v5-phrase-display"
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: -20 }}
+                                    transition={{ duration: 0.3 }}
+                                >
+                                    <V5PhraseStateDisplay />
+                                </motion.div>
+                            ) : (
+                                <motion.div
+                                    key="topk-display"
+                                    initial={{ opacity: 0, y: 20 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    exit={{ opacity: 0, y: -20 }}
+                                    transition={{ duration: 0.3 }}
+                                >
+                                    <TopK />
+                                </motion.div>
+                            )}
+                        </AnimatePresence>
+
                         <TypedBar />
                     </div>
                 </div>

@@ -13,6 +13,8 @@ export default function WebcamPane() {
     const [stream, setStream] = useState<MediaStream | null>(null);
     const animationFrameRef = useRef<number | null>(null);
     const onFeatures = useStore((s: any) => s.onFeatures);
+    const onFeaturesV5 = useStore((s: any) => s.onFeaturesV5);
+    const mode = useStore((s: any) => s.mode);
     const predictionsPaused = useStore((s: any) => s.predictionsPaused);
     const togglePredictionsPaused = useStore((s: any) => s.togglePredictionsPaused);
 
@@ -25,7 +27,23 @@ export default function WebcamPane() {
                 const frame = videoRef.current;
                 const canvas = canvasRef.current;
                 const res = await runVisionFrame(frame, canvas);
-                onFeatures(res); // passes { vec126, vec1662, presenceRatio }
+
+                // Detect hand presence from the vision results
+                const leftHandPresent = res.leftHandPresent || false;
+                const rightHandPresent = res.rightHandPresent || false;
+
+                if (mode === 'phrases') {
+                    // Use v5 phrase logic for phrases mode
+                    onFeaturesV5({
+                        vec1662: res.vec1662,
+                        presenceRatio: res.presenceRatio,
+                        leftHandPresent,
+                        rightHandPresent
+                    });
+                } else {
+                    // Use original logic for letters mode
+                    onFeatures(res);
+                }
             } catch (error) {
                 console.error('Vision processing error:', error);
             }
